@@ -66,7 +66,7 @@ def main():
             cached_coord = memory.get_target_coord(scene, target)
             if cached_coord:
                 cx, cy = cached_coord
-                print(f"⚡ [記憶] 命中黃金快取！直接提取座標 ({cx}, {cy})")
+                print(f"[記憶] 命中黃金快取！直接提取座標 ({cx}, {cy})")
                 env.tap(cx, cy, wait_time=5)
                 used_cache_last_turn = True
                 continue
@@ -110,7 +110,7 @@ def main():
                         if attempt == 0:
                             found_box = (left, top, right, bottom)
                         else:
-                            # 💡 完美實踐你的想法：邊緣分析，鎖定 X 或 Y
+                            # 完美實踐你的想法：邊緣分析，鎖定 X 或 Y
                             print(f" ├─ [邊緣鎖定] 開始分析目標貼著哪一條擴張邊界...")
                             strips = {
                                 "TOP (上邊緣)": (left, top, right, prev_top),
@@ -145,7 +145,7 @@ def main():
                 # === 4. 二元切分逼近法 (取代原本的 Layer 4) ===
                 if target_found_in_crop and found_box:
                     cur_left, cur_top, cur_right, cur_bottom = found_box
-                    print(f"🔬 [Layer 4] 啟動 1D 二元切分逼近法，精確鎖定座標...")
+                    print(f"[Layer 4] 啟動 1D 二元切分逼近法，精確鎖定座標...")
                     
                     # 只要最長邊大於 120 像素，就不斷對半切
                     while (cur_right - cur_left) > 120 or (cur_bottom - cur_top) > 120:
