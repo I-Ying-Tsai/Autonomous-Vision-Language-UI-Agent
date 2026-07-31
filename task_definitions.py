@@ -1,75 +1,83 @@
 from nodes import SequenceNode, SelectorNode, GuardedActionNode, ConditionNode
 
 def build_startup_tree():
-    """
-    任務樹：啟動《未來之戰》並自動處理兩段式廣告彈窗 (附帶載入等待機制)
-    """
+    """任務樹：未來之戰_進入應用程式"""
     
-    # 步驟 1：點擊桌面遊戲圖示
-    step1_launch_game = GuardedActionNode(
-        name="點擊桌面遊戲圖示",
+    # 步驟 1：點擊進入未來之戰應用程式
+    step1_launch = GuardedActionNode(
+        name="點擊進入未來之戰應用程式",
         target_desc="未來之戰",
-        pre_check_prompt="未來之戰"
+        pre_check_prompt="future war app icon on home screen",
+        game_name="未來之戰"
     )
 
-    # -------------------------------------------------------------
-    # 步驟 2：耐心等待遊戲載入 (這是關鍵！等到大廳或彈窗出現才放行)
-    # -------------------------------------------------------------
-    step2_wait_for_loading = ConditionNode(
-        name="等待遊戲載入完成",
-        check_prompt="popup window, X icon, or game lobby",
+    # 步驟 2：等待載入畫面完成或出現廣告彈窗
+    step2_wait_loading = ConditionNode(
+        name="等待載入畫面完成或出現廣告彈窗",
+        check_prompt="ad popup, loading screen, or clean home screen",
         max_retries=200,
         interval=5
     )
 
-    # -------------------------------------------------------------
-    # 步驟 3：狀態判定與彈窗處理
-    # -------------------------------------------------------------
+    # 步驟 3：防禦性 Selector (狀態判定與清理)
     
-    # 3A：檢查是否已經直接在遊戲大廳 (無彈窗)
-    check_lobby_clean = ConditionNode(
-        name="檢查遊戲大廳",
-        check_prompt="game lobby without any popup windows",
+    # 3-A: 檢查是否已經在乾淨首頁
+    check_home_clean = ConditionNode(
+        name="檢查未來之戰首頁",
+        check_prompt="home screen without any ad popups",
         max_retries=1,
         interval=3
     )
 
-    # 3B-1: 點擊廣告右上角的紅色 X
-    click_close_popup = GuardedActionNode(
-        name="1. 點擊廣告彈窗的關閉按鈕 (X)",
-        target_desc="red X close button at top right corner",
-        pre_check_prompt="popup window or X icon"
+    # 3-B: 清理廣告彈窗流程 (如果 3-A 失敗則執行)
+    click_close_ad = GuardedActionNode(
+        name="點擊右上角的關閉圖示",
+        target_desc="close icon",
+        pre_check_prompt="ad popup or close icon",
+        game_name="未來之戰"
     )
 
-    # 3B-2: 點擊挽留確認框中的「確定」按鈕
-    click_confirm_dismiss = GuardedActionNode(
-        name="2. 點擊二次確認框的『確定』按鈕",
-        target_desc="確定",
-        pre_check_prompt="確定"
-    )
-
-    # 3B-3: 關閉後驗證大廳 (轉場可能要一點時間，給 5 次緩衝)
-    check_lobby_after_dismiss = ConditionNode(
-        name="3. 確認成功進入主畫面",
-        check_prompt="game lobby without any popup windows",
+    check_home_after_dismiss = ConditionNode(
+        name="確認成功進入首頁",
+        check_prompt="home screen without any ad popups",
         max_retries=5,
         interval=3
     )
 
-    # 組合 3B (點 X ➔ 點確定 ➔ 看大廳)
-    dismiss_popup_sequence = SequenceNode(
-        name="清理廣告彈窗流程 (連環關閉)",
-        children=[click_close_popup, click_confirm_dismiss, check_lobby_after_dismiss]
+    dismiss_ad_sequence = SequenceNode(
+        name="清理廣告彈窗流程",
+        children=[click_close_ad, check_home_after_dismiss]
     )
 
-    # 組合 3：Selector (乾淨大廳優先，被遮住就走連環關閉流程)
-    step3_handle_popups = SelectorNode(
-        name="進入遊戲主頁 (含連環彈窗容錯)",
-        children=[check_lobby_clean, dismiss_popup_sequence]
+    # 3-C: 確認確認視窗出現並點擊確定按鈕
+    click_confirm_button = GuardedActionNode(
+        name="點擊確定按鈕",
+        target_desc="確定",
+        pre_check_prompt="confirm button",
+        game_name="未來之戰"
     )
 
-    # 最終任務樹：點擊 ➔ 等待載入 ➔ 處理狀態
+    # 3-D: 確認大廳畫面出現完成後繼續流程
+    check_hall_appeared = ConditionNode(
+        name="確認大廳畫面出現完成後繼續流程",
+        check_prompt="main hall screen",
+        max_retries=5,
+        interval=3
+    )
+
+    confirm_and_wait_sequence = SequenceNode(
+        name="處理確認視窗並等待大廳畫面",
+        children=[click_confirm_button, check_hall_appeared]
+    )
+
+    # 組合 Selector
+    step3_handle_ad_popup = SelectorNode(
+        name="進入未來之戰首頁 (容錯 Selector)",
+        children=[check_home_clean, dismiss_ad_sequence, confirm_and_wait_sequence]
+    )
+
+    # 最終組合
     return SequenceNode(
-        name="啟動《未來之戰》自動化流程",
-        children=[step1_launch_game, step2_wait_for_loading, step3_handle_popups]
+        name="最終自動化流程",
+        children=[step1_launch, step2_wait_loading, step3_handle_ad_popup]
     )

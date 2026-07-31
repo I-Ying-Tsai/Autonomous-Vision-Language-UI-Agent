@@ -4,3 +4,4 @@ platform-tools/
 *.jpg
 *.png
 agent_memory.json
+qq.py

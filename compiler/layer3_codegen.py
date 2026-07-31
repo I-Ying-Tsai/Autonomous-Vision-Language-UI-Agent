@@ -26,9 +26,10 @@ class Layer3CodeGenerator:
 3. `ConditionNode(name: str, check_prompt: str, max_retries: int, interval: int)` : 用於等待畫面或檢查狀態。
    - 【重要】請務必根據 JSON 節點的 name 與上下文，自動推導並生成精準的英文 VLM 辨識提示詞填入 `check_prompt`。
    - 預設給予 max_retries=5, interval=3。若是「等待載入完成」這類耗時動作，設定 max_retries=200, interval=5。
-4. `GuardedActionNode(name: str, target_desc: str, pre_check_prompt: str)` : 執行點擊動作。
+4. `GuardedActionNode(name: str, target_desc: str, pre_check_prompt: str, game_name: str)` : 執行點擊動作。
    - `target_desc` 填入 JSON 的 target。
    - `pre_check_prompt` 填入目標的英文描述 (供 VLM 提前檢查用)。
+   - 【重要】`game_name` 必須填入從 JSON 藍圖或任務上下文中推導出的「遊戲名稱」或「App名稱」(例如: "未來之戰"、"購物商城")。
 
 【程式碼撰寫風格】
 1. 開頭必須包含：`from nodes import SequenceNode, SelectorNode, GuardedActionNode, ConditionNode`
@@ -37,7 +38,6 @@ class Layer3CodeGenerator:
 4. 遇到 If-Else 的彈窗或容錯邏輯（SelectorNode），請參考下方範例的「防禦性行為樹設計」：也就是 Selector 的第一個子節點通常是 ConditionNode (檢查是否已經是乾淨狀態)，第二個子節點才是 SequenceNode (執行清除與修復動作)。
 """
 
-        # 反過擬合範例：改用「購物商城App」，邏輯變更為單次關閉，避免模型背誦未來之戰的步驟
         few_shot_user = "請根據『啟動購物商城並處理紅包彈窗』的 JSON 藍圖，產出高質量的行為樹腳本。"
         few_shot_assistant = '''```python
 from nodes import SequenceNode, SelectorNode, GuardedActionNode, ConditionNode
@@ -49,7 +49,8 @@ def build_startup_tree():
     step1_launch = GuardedActionNode(
         name="點擊桌面購物商城圖示",
         target_desc="購物商城",
-        pre_check_prompt="shopping app icon on desktop"
+        pre_check_prompt="shopping app icon on desktop",
+        game_name="購物商城"
     )
 
     # 步驟 2：等待初始載入
@@ -74,7 +75,8 @@ def build_startup_tree():
     click_close_promo = GuardedActionNode(
         name="點擊紅包彈窗的關閉按鈕",
         target_desc="close banner icon",
-        pre_check_prompt="promo popup or X icon"
+        pre_check_prompt="promo popup or X icon",
+        game_name="購物商城"
     )
 
     check_home_after_dismiss = ConditionNode(

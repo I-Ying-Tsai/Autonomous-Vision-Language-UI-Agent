@@ -62,29 +62,32 @@ class SelectorNode(Node):
         return NodeState.FAILURE
 
 class GuardedActionNode(Node):
-    def __init__(self, name, target_desc, pre_check_prompt):
+    def __init__(self, name, target_desc, pre_check_prompt, game_name):
         self.name = name
         self.target_desc = target_desc
         self.pre_check_prompt = pre_check_prompt
+        self.game_name = game_name
 
     def tick(self, env, brain, memory):
         print(f"\n[GuardedNode: {self.name}] 開始執行...")
         
-        # 1. 抓取點擊前截圖，並直接讀入 RAM (記憶體) 中！
+        screen_width, screen_height = env.get_screen_size()
+        
         raw_screen = env.capture_screen()
         from PIL import Image
         with Image.open(raw_screen) as img:
-            before_img = img.copy().convert('RGB') # 💡 完美解決覆寫：把像素抽出來放進 Cache 變數！
+            before_img = img.copy().convert('RGB')
 
-        # 2. 前置門禁驗證 (VLM 還是需要吃路徑)
         if self.pre_check_prompt:
             print(f" ├─ [Pre-Check] 門禁檢查: 「{self.pre_check_prompt}」")
             if not brain.check_presence(raw_screen, self.pre_check_prompt):
                 print(f" └─ 前置條件不符合，拒絕點擊！")
                 return NodeState.FAILURE
 
-        # 3. 檢查快取或進行二元切分精準定位
-        cached_coord = memory.get_target_coord("global_scene", self.target_desc)
+        cached_coord = memory.get_target_coord(
+            self.game_name, "global_scene", self.target_desc, screen_width, screen_height
+        )
+        
         if cached_coord:
             global_x, global_y = cached_coord
             print(f" ├─ [記憶] 命中黃金快取: ({global_x}, {global_y})")
@@ -96,30 +99,28 @@ class GuardedActionNode(Node):
                 return NodeState.FAILURE
             global_x, global_y = coord
 
-        # 4. 執行實體點擊，並給予 5 秒轉場載入時間
         env.tap(global_x, global_y, wait_time=5)
 
-        # 5. 抓取點擊後新截圖
         after_screen = env.capture_screen()
         with Image.open(after_screen) as img:
-            after_img = img.copy().convert('RGB') # 💡 再次讀入 RAM
+            after_img = img.copy().convert('RGB') 
 
-        # 6. 通用後置驗證：直接傳遞 RAM 裡的圖片物件給大腦，完全避開檔案覆寫問題
         print(f" ├─ [Post-Check] 啟動通用轉場驗證...")
         is_changed = brain.is_screen_changed_math(before_img, after_img)
         
         if not is_changed:
             print(f" ├─ 數學像素差異較小，啟動 VLM 雙圖通用轉場比對...")
-            # VLM 需要 base64，所以這裡傳原本的路徑字串
             is_changed = brain.check_screen_changed_vlm(raw_screen, after_screen)
 
         if is_changed:
             print(f" └─ 通用轉場驗證通過！成功切換畫面，寫入黃金快取。")
-            memory.update_target_coord("global_scene", self.target_desc, global_x, global_y)
+            memory.update_target_coord(
+                self.game_name, "global_scene", self.target_desc, global_x, global_y, screen_width, screen_height
+            )
             return NodeState.SUCCESS
         else:
             print(f" └─ 點擊後畫面未產生顯著轉場，清除該座標快取！")
-            memory.invalidate_target("global_scene", self.target_desc)
+            memory.invalidate_target(self.game_name, "global_scene", self.target_desc)
             return NodeState.FAILURE
 
 class ConditionNode(Node):
