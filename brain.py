@@ -3,21 +3,179 @@ import json
 import ollama
 import re
 import os
+import cv2
+import numpy as np
 from PIL import Image, ImageChops, ImageStat
+from typing import Optional, List, Tuple, Dict
+from pydantic import BaseModel, Field
 from config import MODEL_NAME, WORKSPACE_DIR
 
+# ==========================================
+# [新增] Pydantic 結構化 Schema (強制 VLM 輸出格式)
+# ==========================================
+class XButtonDecision(BaseModel):
+    target_label_id: int = Field(
+        description="The integer label ID (e.g. 2) that corresponds to the close 'X' button of the main dialog window. You MUST output a valid number from the image."
+    )
+    reasoning: str = Field(
+        description="Brief explanation for why this label was chosen."
+    )
+    confidence: float = Field(
+        default=0.0,
+        description="Confidence score between 0.0 and 1.0."
+    )
+
+# ==========================================
+# [新增] X Icon 專用特徵篩選器 (OpenCV)
+# ==========================================
+class XButtonSoMAnnotator:
+    def __init__(self, min_size: int = 25, max_size: int = 70):
+        self.min_size = min_size
+        self.max_size = max_size
+
+    def generate_x_candidates_som(self, image_path: str, output_path: str) -> Dict[int, Tuple[int, int]]:
+        img = cv2.imread(image_path)
+        if img is None:
+            raise FileNotFoundError(f"無法載入圖片：{image_path}")
+        
+        orig_h, orig_w, _ = img.shape
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+        edged = cv2.Canny(gray, 40, 150)
+        cross_kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+        dilated = cv2.dilate(edged, cross_kernel, iterations=1)
+
+        contours, _ = cv2.findContours(dilated, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        
+        raw_candidates = []
+        for cnt in contours:
+            x, y, w, h = cv2.boundingRect(cnt)
+            aspect_ratio = w / float(h)
+
+            if self.min_size <= w <= self.max_size and self.min_size <= h <= self.max_size:
+                if 0.70 <= aspect_ratio <= 1.40 and y < orig_h * 0.85:
+                    raw_candidates.append((x, y, w, h))
+
+        filtered_boxes = self._deduplicate_candidates(raw_candidates)
+
+        overlay = img.copy()
+        labeled_img = img.copy()
+        label_map: Dict[int, Tuple[int, int]] = {}
+
+        for idx, (x, y, w, h) in enumerate(filtered_boxes, start=1):
+            center_x = x + w // 2
+            center_y = y + h // 2
+            label_map[idx] = (center_x, center_y)
+
+            label_x = max(5, x - 5)
+            label_y = max(20, y - 5)
+            text = f"[{idx}]"
+            (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+
+            cv2.rectangle(overlay, (label_x - 2, label_y - th - 2), (label_x + tw + 2, label_y + 2), (255, 0, 0), -1)
+            cv2.putText(labeled_img, text, (label_x, label_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+
+        cv2.addWeighted(overlay, 0.45, labeled_img, 0.55, 0, labeled_img)
+        cv2.imwrite(output_path, labeled_img)
+        
+        return label_map
+
+    def _deduplicate_candidates(self, boxes: List[Tuple[int, int, int, int]]) -> List[Tuple[int, int, int, int]]:
+        boxes = sorted(boxes, key=lambda b: b[2] * b[3], reverse=True)
+        unique_boxes = []
+        for b in boxes:
+            x, y, w, h = b
+            cx, cy = x + w // 2, y + h // 2
+            overlap = False
+            for ux, uy, uw, uh in unique_boxes:
+                ucx, ucy = ux + uw // 2, uy + uh // 2
+                if abs(cx - ucx) < 25 and abs(cy - ucy) < 25:
+                    overlap = True
+                    break
+            if not overlap:
+                unique_boxes.append(b)
+        return unique_boxes
+
+
 class Brain:
+    def __init__(self):
+        self.x_annotator = XButtonSoMAnnotator(min_size=15, max_size=70)
+
     def _get_b64(self, img_path):
         with open(img_path, "rb") as f:
             return base64.b64encode(f.read()).decode("utf-8")
 
     # ==========================================
-    # [通用轉場驗證 1] 純數學像素比對 (支援 RAM 物件直讀)
+    # [核心修改] 統一視覺定位入口 (Router)
+    # ==========================================
+    def locate_target(self, img_path, target_desc) -> Optional[Tuple[int, int]]:
+        """智慧分流：依照目標描述決定要用哪種演算法定位"""
+        is_close_btn = any(kw in target_desc.lower() for kw in ["x", "close", "關閉", "取消"])
+        
+        if is_close_btn:
+            print(f"[Brain] 偵測到關閉按鈕意圖，啟動【SoM 特化視覺模型】尋找: {target_desc}")
+            coord = self._locate_x_button_som(img_path)
+            if coord:
+                return coord
+            print("[Brain] SoM 特化定位失敗，退回泛用搜尋 (Fallback)...")
+            
+        print(f"[Brain] 啟動【泛用二分搜/VLM預測模型】尋找: {target_desc}")
+        return self.locate_target_binary_search(img_path, target_desc)
+
+    # ==========================================
+    # [新增] SoM 關閉按鈕特化定位
+    # ==========================================
+    def _locate_x_button_som(self, img_path) -> Optional[Tuple[int, int]]:
+        som_output_path = os.path.join(WORKSPACE_DIR, "temp_x_candidates_som.png")
+        try:
+            label_map = self.x_annotator.generate_x_candidates_som(img_path, som_output_path)
+            candidate_count = len(label_map)
+            
+            if candidate_count == 0:
+                print("   [Brain] OpenCV 未搜尋到候選點。")
+                return None
+                
+            prompt = (
+                f"There are {candidate_count} candidate labels marked with [x] in the image.\n"
+                "Identify which label ID corresponds to the CLOSE ('X') button used to close the main central pop-up/dialog window.\n"
+                "Select the correct label ID from the candidates."
+            )
+            
+            print(f"   [Brain] 成功篩選出 {candidate_count} 個候選點，發送給 VLM 進行決策...")
+            res = ollama.chat(
+                model=MODEL_NAME, 
+                messages=[
+                    {'role': 'system', 'content': 'You are a precise GUI Automation Agent. Analyze the image labels and respond ONLY in JSON using the requested schema.'},
+                    {'role': 'user', 'content': prompt, 'images': [self._get_b64(som_output_path)]}
+                ],
+                format=XButtonDecision.model_json_schema(),
+                options={'temperature': 0.1}
+            )
+            
+            decision = XButtonDecision.model_validate_json(res['message']['content'])
+            print(f"   [Brain] 模型決策結果: ID=[{decision.target_label_id}], 理由: {decision.reasoning}")
+            
+            target_id = decision.target_label_id
+            if target_id and target_id in label_map:
+                coord = label_map[target_id]
+                print(f"   精確點擊像素座標 : {coord}")
+                return coord
+            else:
+                print(f"   [Brain] 模型選取的標籤編號 [{target_id}] 無效。")
+                return None
+                
+        except Exception as e:
+            print(f"   [Brain] SoM 定位發生異常: {e}")
+            return None
+        finally:
+            if os.path.exists(som_output_path):
+                os.remove(som_output_path)
+
+    # ==========================================
+    # [通用轉場驗證 1] 純數學像素比對
     # ==========================================
     def is_screen_changed_math(self, img1, img2, threshold=12.0):
-        """計算兩張截圖的平均像素差異，可直接接收 PIL Image 物件避免 Disk I/O"""
         try:
-            # 如果傳進來的是字串(路徑)，就讀取；如果是物件，就直接用
             if isinstance(img1, str): img1 = Image.open(img1).convert('RGB')
             if isinstance(img2, str): img2 = Image.open(img2).convert('RGB')
             
@@ -32,10 +190,9 @@ class Brain:
             return False
 
     # ==========================================
-    # [通用轉場驗證 2] VLM 通用雙圖對比 (無寫死文字)
+    # [通用轉場驗證 2] VLM 通用雙圖對比
     # ==========================================
     def check_screen_changed_vlm(self, img1_path, img2_path):
-        """直接詢問 VLM 畫面是否已完成轉場/切換"""
         prompt = "Compare Picture A (before action) and Picture B (after action). Has the user interface or screen navigated or transitioned significantly? Answer strictly YES or NO."
         res = ollama.chat(
             model=MODEL_NAME, 
@@ -75,12 +232,7 @@ class Brain:
     # [標準介面] 精確定位器 (自動清理裁切碎片)
     # ==========================================
     def locate_target_binary_search(self, img_path, target_desc):
-        """
-        [正中央同心圓擴張搜尋]
-        不依賴 VLM 初始猜測，直接從螢幕正中央向外擴張尋寶，並搭配 1D 二元切分。
-        """
         temp_crop_path = os.path.join(WORKSPACE_DIR, "temp_localization_crop.png")
-        
         try:
             with Image.open(img_path) as img:
                 width, height = img.size
@@ -90,7 +242,6 @@ class Brain:
 
             print(f"   [Brain] 啟動正中央同心圓擴張，初始落點: ({cx}, {cy})")
             
-            # 從中央擴張時，步長設為 200，能以最少次數涵蓋全螢幕
             box_size = 150   
             expansion_step = 150
             max_expansions = 12
@@ -99,14 +250,12 @@ class Brain:
             found_box = None
             target_found = False
 
-            # 2. 同心圓擴張尋寶
             for attempt in range(max_expansions + 1):
                 left = max(0, cx - box_size // 2)
                 top = max(0, cy - box_size // 2)
                 right = min(width, cx + box_size // 2)
                 bottom = min(height, cy + box_size // 2)
                 
-                # 防呆：確保邊界合法
                 if right <= left: right = left + 1
                 if bottom <= top: bottom = top + 1
                 
@@ -120,7 +269,6 @@ class Brain:
                     if attempt == 0:
                         found_box = (left, top, right, bottom)
                     else:
-                        # 邊緣鎖定：檢查目標究竟出現在東、南、西、北哪一個新擴張的環帶中
                         strips = {
                             "TOP": (left, top, right, prev_top),
                             "BOTTOM": (left, prev_bottom, right, bottom),
@@ -148,7 +296,6 @@ class Brain:
                     prev_left, prev_top, prev_right, prev_bottom = left, top, right, bottom
                     box_size += expansion_step
 
-            # 3. 1D 二元切分逼近法
             if target_found and found_box:
                 cur_left, cur_top, cur_right, cur_bottom = found_box
                 print(f"   [Brain] 啟動 1D 二元切分逼近精確座標...")
@@ -178,7 +325,6 @@ class Brain:
                 return global_x, global_y
 
             return None
-
         finally:
             if os.path.exists(temp_crop_path):
                 os.remove(temp_crop_path)
