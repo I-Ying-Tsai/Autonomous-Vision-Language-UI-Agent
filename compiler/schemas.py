@@ -68,7 +68,6 @@ class IRBlueprint:
 
     @classmethod
     def from_dict(cls, data: dict) -> IRBlueprint:
-        """將 LLM 解析出的字典轉換為 IRBlueprint 物件"""
         if not isinstance(data, dict):
             return cls()
 
@@ -92,7 +91,6 @@ class BugReport:
 
 
 def get_bug_report_attr(bug_report: Union[BugReport, dict, None], attr_name: str, default: str = "") -> str:
-    """通用防呆讀取器：相容 dict、BugReport 物件與 Enum 值的提取"""
     if not bug_report:
         return default
 
@@ -102,11 +100,9 @@ def get_bug_report_attr(bug_report: Union[BugReport, dict, None], attr_name: str
     else:
         raw_val = getattr(bug_report, attr_name, None)
 
-    # raw_val 為 None 時直接回傳預設值，避免轉成字串 "None"
     if raw_val is None:
         return default
 
-    # 增強防呆：若值為 Enum 實例，取出其字串 .value
     if isinstance(raw_val, Enum):
         return str(raw_val.value)
 

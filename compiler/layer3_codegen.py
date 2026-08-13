@@ -1,41 +1,61 @@
 import json
+import os
 import re
 import ollama
-from dataclasses import asdict
-from schemas import IRBlueprint
+import dataclasses
+from compiler.schemas import IRBlueprint
 
 class Layer3CodeGenerator:
-    """Layer 3: 核心代碼生成層 (將 IR JSON 翻譯為高階 nodes.py 腳本)"""
-    
-    def __init__(self, model_name="qwen3.5:9b"):
+    def __init__(self, model_name="qwen2.5-coder:7b"):
         self.model_name = model_name
+        # 定義字典檔的路徑
+        self.glossary_path = "workspace/glossary.json"
+
+    def _load_glossary(self) -> str:
+        """動態讀取外部術語字典"""
+        if os.path.exists(self.glossary_path):
+            try:
+                with open(self.glossary_path, "r", encoding="utf-8") as f:
+                    glossary_data = json.load(f)
+                    return json.dumps(glossary_data, ensure_ascii=False, indent=2)
+            except Exception as e:
+                print(f"[Layer 3 警告] 無法讀取字典檔: {e}")
+        return "{}"
 
     def generate_code(self, blueprint: IRBlueprint) -> str:
         print(f"\n[Layer 3] 正在調用 {self.model_name} 將 IR 藍圖編譯為 Python 原始碼...")
         
-        blueprint_dict = asdict(blueprint)
-        json_payload = json.dumps(blueprint_dict, ensure_ascii=False, indent=2)
+        dynamic_glossary = self._load_glossary()
 
-        system_prompt = """
-你是資深 Python 核心工程師與自動化測試專家。負責將行為樹藍圖 (IR JSON) 翻譯為可執行的 Python 原始碼。
+        json_payload = json.dumps(dataclasses.asdict(blueprint), ensure_ascii=False, indent=2)
 
-【底層 API 介面規範 (nodes.py)】
-必須嚴格遵守以下四種節點類別的實作與參數填寫：
-1. `SequenceNode(name: str, children: list)` : 線性執行。
-2. `SelectorNode(name: str, children: list)` : 條件/容錯分支。
-3. `ConditionNode(name: str, check_prompt: str, max_retries: int, interval: int)` : 用於等待畫面或檢查狀態。
-   - 【重要】請務必根據 JSON 節點的 name 與上下文，自動推導並生成精準的英文 VLM 辨識提示詞填入 `check_prompt`。
-   - 預設給予 max_retries=5, interval=3。若是「等待載入完成」這類耗時動作，設定 max_retries=200, interval=5。
-4. `GuardedActionNode(name: str, target_desc: str, pre_check_prompt: str, game_name: str)` : 執行點擊動作。
-   - `target_desc` 填入 JSON 的 target。
-   - `pre_check_prompt` 填入目標的英文描述 (供 VLM 提前檢查用)。
-   - 【重要】`game_name` 必須填入從 JSON 藍圖或任務上下文中推導出的「遊戲名稱」或「App名稱」(例如: "未來之戰"、"購物商城")。
+        system_prompt = f"""
+You are a Senior Core Python Engineer and Automation Testing Expert. Your task is to translate a Behavior Tree blueprint (IR JSON) into executable Python source code.
 
-【程式碼撰寫風格】
-1. 開頭必須包含：`from nodes import SequenceNode, SelectorNode, GuardedActionNode, ConditionNode`
-2. 函式名稱固定為 `def build_startup_tree():`
-3. 必須採用「先定義節點變數 -> 再組裝 children」的形式撰寫。
-4. 遇到 If-Else 的彈窗或容錯邏輯（SelectorNode），請參考下方範例的「防禦性行為樹設計」：也就是 Selector 的第一個子節點通常是 ConditionNode (檢查是否已經是乾淨狀態)，第二個子節點才是 SequenceNode (執行清除與修復動作)。
+[VLM Prompt Generation Rules (Dynamic Glossary)]
+To ensure the Vision-Language Model (VLM) accurately recognizes the screen, strictly and preferentially refer to the English translations in the JSON dictionary below when deriving `check_prompt` and `pre_check_prompt`.
+If a UI term is not in the dictionary, use the most precise English description that fits the UI structure.
+
+Current Dynamic Glossary:
+{dynamic_glossary}
+
+[Underlying API Interface Rules (nodes.py)]
+You MUST strictly implement and fill parameters for the following 4 node classes:
+1. `SequenceNode(name: str, children: list)`: Linear execution.
+2. `SelectorNode(name: str, children: list)`: Conditional/Fallback branches.
+3. `ConditionNode(name: str, check_prompt: str, max_retries: int, interval: int)`: Used for waiting or status checking.
+   - [CRITICAL] Derive and generate a precise English VLM recognition prompt for `check_prompt` based on the JSON node's name and context.
+   - Default to max_retries=5, interval=3. If it's a time-consuming action like "waiting for loading", set max_retries=20, interval=5.
+4. `GuardedActionNode(name: str, target_desc: str, pre_check_prompt: str, game_name: str)`: Executes a click action.
+   - `target_desc` must be filled with the 'target' value from JSON (Keep original language, e.g., Traditional Chinese).
+   - `pre_check_prompt` must be an English description of the target for VLM pre-checking.
+   - [CRITICAL] `game_name` must be derived from the JSON blueprint or context (e.g., "未來之戰", "購物商城").
+
+[Coding Style Requirements]
+1. The top of the file MUST include: `from nodes import SequenceNode, SelectorNode, GuardedActionNode, ConditionNode`
+2. The function name MUST be exactly: `def build_startup_tree():`
+3. You must write in the format of "defining node variables first -> assembling children later".
+4. When encountering If-Else popups or fallback logic (SelectorNode), design defensively: the first child of the Selector should usually be a ConditionNode (checking for a clean state), and the second child a SequenceNode (executing clear/fix actions).
 """
 
         few_shot_user = "請根據『啟動購物商城並處理紅包彈窗』的 JSON 藍圖，產出高質量的行為樹腳本。"
@@ -57,7 +77,7 @@ def build_startup_tree():
     step2_wait_loading = ConditionNode(
         name="等待商城首頁載入",
         check_prompt="promo popup, banner, or clean home screen",
-        max_retries=200,
+        max_retries=20,
         interval=5
     )
 
@@ -103,12 +123,12 @@ def build_startup_tree():
         children=[step1_launch, step2_wait_loading, step3_handle_popups]
     )
 ```'''
-
+        
         messages = [
             {'role': 'system', 'content': system_prompt},
             {'role': 'user', 'content': few_shot_user},
             {'role': 'assistant', 'content': few_shot_assistant},
-            {'role': 'user', 'content': f"請嚴格根據以下 IR JSON 藍圖，將其轉換為 Python 腳本（請將推導放在 <think> 區塊中）：\n{json_payload}"}
+            {'role': 'user', 'content': f"Please strictly translate the following IR JSON blueprint into a Python script. (Put your reasoning in a <think> block):\n{json_payload}"}
         ]
 
         try:

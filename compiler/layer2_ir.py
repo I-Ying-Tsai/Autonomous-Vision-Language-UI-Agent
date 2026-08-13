@@ -1,16 +1,17 @@
 import json
 import re
 import ollama
-from schemas import IRBlueprint
+from dataclasses import asdict
+from compiler.schemas import IRBlueprint
 
 class Layer2IRGenerator:
-    """Layer 2: 狀態機與邏輯藍圖編譯層 (將 Layer 1 樹狀文本編譯為 Behavior Tree JSON)"""
+    """Layer 2: 狀態機與邏輯藍圖編譯層 (支援原始生成與熱增補 Patch 功能)"""
     
     def __init__(self, model_name="qwen2.5-coder:7b"):
         self.model_name = model_name
 
     def generate_blueprint(self, layer1_text: str) -> IRBlueprint:
-        print(f"\n[Layer 2] 正在調用 {self.model_name} 編譯行為樹藍圖 (IR JSON)...")
+        print(f"\n[Layer 2] 正在調用 {self.model_name} 編譯初始行為樹藍圖 (IR JSON)...")
         
         system_prompt = """
 你是資深的系統架構師與行為樹編譯器。請將 Layer 1 的樹狀邏輯文本，一字不漏（就事論事）地轉換為嚴格的 Behavior Tree JSON 藍圖。
@@ -26,7 +27,7 @@ class Layer2IRGenerator:
 - 若為「TEXT:內容」 ➔ target="內容", target_type="text"
 - 若為「ICON:內容」 ➔ target="內容", target_type="icon"
 注意：JSON 中的 target 欄位必須剝離 TEXT: 與 ICON: 前綴，也不要保留「」符號。
-注意:name 欄位是用來描述該步驟的易讀名稱，請將 name 欄位中的「TEXT:...」或「ICON:...」等原始標籤清除，保持文句通順。
+注意: name 欄位是用來描述該步驟的易讀名稱，請將 name 欄位中的「TEXT:...」或「ICON:...」等原始標籤清除，保持文句通順。
 
 【JSON Schema 要求】
 必須回傳以下格式，直接輸出純 JSON 字串，不要包含 markdown 標籤：
@@ -44,19 +45,18 @@ class Layer2IRGenerator:
 }
 """
 
-        # 單樣本 (One-Shot) 範例：使用異界抽卡大師，強迫模型學習結構映射
         few_shot_user = """
 請轉換以下文本：
 <GAME>異界抽卡大師</GAME>
 
 ├─── [開始] 進入「TEXT:異界抽卡大師」應用程式
-│     ├─── 等待登入載入完成
-│     └─── 判斷：是否有每日簽到彈窗？
-│           ├─── [是]
-│           │     ├─── 點擊「ICON:gift box icon」
-│           │     └─── 點擊「TEXT:立即領取」按鈕
-│           └─── [否]
-│                 └─── (無操作) 直接等待主城頁面
+│    ├─── 等待登入載入完成
+│    └─── 判斷：是否有每日簽到彈窗？
+│          ├─── [是]
+│          │    ├─── 點擊「ICON:gift box icon」
+│          │    └─── 點擊「TEXT:立即領取」按鈕
+│          └─── [否]
+│               └─── (無操作) 直接等待主城頁面
 """
         few_shot_assistant = """{
   "task_name": "異界抽卡大師_登入流程",
@@ -139,35 +139,76 @@ class Layer2IRGenerator:
             print("\n[Layer 2] IR JSON 藍圖編譯成功！強型別斷言通過。")
             return blueprint
             
-        except json.JSONDecodeError as e:
-            print(f"\n[Layer 2] JSON 解析失敗: {e}")
-            print(f"原始輸出:\n{raw_output}")
-            return None
         except Exception as e:
-            print(f"\n[Layer 2] 發生非預期錯誤: {e}")
+            print(f"\n[Layer 2] JSON 解析失敗: {e}")
             return None
 
+    def patch_blueprint(self, old_blueprint: IRBlueprint, bug_report: dict) -> IRBlueprint:
+        """
+        [新增功能] 外科手術式修補：接收舊版 IRBlueprint 與 Layer 4 診斷書，
+        在嚴格保留原有正確邏輯的前提下，更新產出新一代 IRBlueprint。
+        """
+        print(f"\n[Layer 2 Patch] 正在調用 {self.model_name} 對舊藍圖進行外科手術局部增補...")
+        
+        old_blueprint_dict = asdict(old_blueprint) if hasattr(old_blueprint, "__dataclass_fields__") else old_blueprint
+        old_json_str = json.dumps(old_blueprint_dict, ensure_ascii=False, indent=2)
+        
+        diagnostic_message = bug_report.get("diagnostic_message", "無詳細診斷")
+        fixed_hint = bug_report.get("fixed_hint", "無具體修復建議")
 
-# ==========================================
-# 本地串接測試
-# ==========================================
-if __name__ == "__main__":
-    from layer1_intent import Layer1IntentParser
+        system_prompt = """
+你是資深系統架構師與行為樹重構專家。
+你的任務是接收「舊版的行為樹藍圖 (Old IR JSON)」與「QA 審查員的修復建議 (Fixed Hint)」，進行外科手術式的最小幅度修改，產出全新一代的 JSON 藍圖。
 
-    # 1. 先執行 Layer 1
-    l1_parser = Layer1IntentParser(model_name="qwen3.5:9b")
-    test_input = "進入未來之戰，等待載入畫面。如果跳出廣告彈窗，就點擊右上角的 X 關掉它，然後再點確定。如果沒彈窗就直接等大廳出現。"
-    
-    confirmed_text = l1_parser.parse_and_confirm(test_input)
+【極度重要：最小修改原則 (Minimal Invasive Principles)】
+1. 嚴格保留舊藍圖中已經存在的所有節點、名稱 (name)、目標 (target) 與結構，絕對不可任意刪除或覆寫現有的正確步驟（避免災難性遺忘）。
+2. 仔細閱讀修復建議，精準地在指定的現有節點「之前」或「之後」插入新的條件 (wait_condition) 或動作 (guarded_action)，或是將目標節點包裝進新的 selector/sequence 中。
+3. 確保結構完整，遵守 Behavior Tree 的邏輯流轉。
 
-    # 2. 接續執行 Layer 2
-    if confirmed_text:
-        l2_generator = Layer2IRGenerator(model_name="qwen2.5-coder:7b")
-        blueprint = l2_generator.generate_blueprint(confirmed_text)
+【JSON Schema 要求】
+必須回傳以下格式，直接輸出純 JSON 字串，不要包含 markdown 標籤：
+{
+  "task_name": "任務名稱",
+  "steps": [ ... 包含修補後的全新步驟陣列 ... ]
+}
+"""
 
-        if blueprint:
-            print("\n" + "="*60)
-            print("【Layer 2 產出的強型別 IRBlueprint 資料結構】")
-            print("="*60)
-            import pprint
-            pprint.pprint(blueprint, indent=2)
+        user_prompt = f"""
+【舊版 IR JSON 藍圖】
+{old_json_str}
+
+【QA 審查員診斷訊息】
+{diagnostic_message}
+
+【QA 審查員修復建議 (Fixed Hint)】
+{fixed_hint}
+
+請嚴格遵守最小修改原則，重構並產出修正後的全新 Behavior Tree JSON 藍圖：
+"""
+
+        try:
+            response = ollama.chat(
+                model=self.model_name,
+                messages=[
+                    {'role': 'system', 'content': system_prompt},
+                    {'role': 'user', 'content': user_prompt}
+                ],
+                format='json',
+                options={'temperature': 0.1}
+            )
+            
+            raw_output = response['message']['content']
+            json_str = re.sub(r'```json\n|\n```', '', raw_output).strip()
+            
+            if '</think>' in json_str:
+                json_str = json_str.split('</think>')[-1].strip()
+                
+            blueprint_dict = json.loads(json_str)
+            new_blueprint = IRBlueprint.from_dict(blueprint_dict)
+            
+            print("\n[Layer 2 Patch] 外科手術增補完成！新一代 IR Blueprint 強型別轉換成功。")
+            return new_blueprint
+            
+        except Exception as e:
+            print(f"\n[Layer 2 Patch] 藍圖增補修復失敗: {e}")
+            return None

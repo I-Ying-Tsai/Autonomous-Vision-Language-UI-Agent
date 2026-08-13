@@ -1,9 +1,11 @@
 import json
 import re
+import os
+import base64
 import ollama
 
 # ==========================================
-# 模組 1：沙盒微型行為樹引擎 (Mock Engine)
+# 模組 1：沙盒微型行為樹引擎
 # ==========================================
 trace_log = []
 sandbox_env = {"current_screen": "unknown", "is_deadlock": False}
@@ -82,60 +84,116 @@ class SelectorNode:
 
 
 # ==========================================
-# 模組 2：Layer 4 QA 審查員 (LLM Evaluator)
+# 模組 2：Layer 4 雙腦協作 QA 審查員 (Multi-Agent Evaluator)
 # ==========================================
 class Layer4SandboxQA:
-    def __init__(self, model_name="qwen3.5:9b"):
-        self.model_name = model_name
+    def __init__(self, vision_model="qwen3-vl:8b", logic_model="qwen2.5-coder:7b"):
+        self.vision_model = vision_model
+        self.logic_model = logic_model
 
-    def evaluate(self, layer1_tree: str, generated_code: str, test_scenario: str, raw_trace: str) -> dict:
-        print(f"\n[Layer 4] 啟動 QA 審查員 ({self.model_name}) 進行軌跡比對與邏輯推理...")
+    def _encode_image(self, image_path: str) -> str:
+        """將圖片轉為 base64"""
+        with open(image_path, "rb") as image_file:
+            return base64.b64encode(image_file.read()).decode('utf-8')
 
+    def _stage1_vision_pass(self, image_path: str) -> str:
+        """第一階段：讓視覺模型看圖說故事"""
+        print(f"\n[Layer 4 - Stage 1] 啟動視覺大腦 ({self.vision_model}) 分析錯誤截圖...")
+        
+        prompt = """
+        Analyze this screenshot from a mobile device carefully.
+        1. Describe the current overall UI state (e.g., is it a game lobby, a loading screen, the home desktop, or a popup ad?).
+        2. Are there any visible popups, modal windows, or error messages?
+        3. List the most prominent buttons or interactive elements you can see (especially "X", "Close", "Confirm", or specific app icons).
+        Keep the description concise but highly accurate.
+        """
+        
+        try:
+            res = ollama.chat(
+                model=self.vision_model,
+                messages=[
+                    {
+                        'role': 'user', 
+                        'content': prompt,
+                        'images': [self._encode_image(image_path)]
+                    }
+                ],
+                options={'temperature': 0.1}
+            )
+            vision_desc = res['message']['content']
+            print(f" └─ 視覺回報: {vision_desc.strip()}")
+            return vision_desc
+        except Exception as e:
+            print(f" └─ 視覺分析失敗: {e}")
+            return "Vision analysis failed. Unable to provide visual context."
+
+    def evaluate(self, layer1_tree: str, generated_code: str, test_scenario: str, raw_trace: str, error_image_path: str = None) -> dict:
+        """第二階段：邏輯大腦進行 CoT 推理與產出修復藍圖"""
+        
+        # 1. 獲取視覺上下文 (如果有傳圖片)
+        vision_context = "No screenshot provided for this error."
+        if error_image_path and os.path.exists(error_image_path):
+            vision_context = self._stage1_vision_pass(error_image_path)
+
+        print(f"\n[Layer 4 - Stage 2] 啟動邏輯大腦 ({self.logic_model}) 進行綜合診斷...")
+
+        # 2. 嚴格的英文邏輯指令 (套用我們先前優化的提示詞)
         system_prompt = """
-你是自動化系統的 QA 測試架構師，同時也是精通行為樹 (Behavior Tree) 底層運作邏輯的專家。
-你的任務是審查沙盒的執行軌跡 (Trace Log)，靠自己的邏輯推演找出程式碼中的邏輯漏洞。
+You are a QA Test Architect for an autonomous UI agent and an expert in Behavior Tree (BT) underlying logic.
+Your task is to review the execution Trace Log, the Visual Context of the screen, and use logical deduction to identify logical flaws in the generated Python code.
 
-【行為樹運作基礎 (BT Fundamentals)】
-請在推演時，嚴格基於以下兩大原則：
-1. SelectorNode (選擇節點)：從左到右執行子節點。只要遇到【任何一個】子節點回傳 SUCCESS，就會【立刻停止並回傳 SUCCESS】。只有全部子節點都失敗才回傳 FAILURE。
-2. SequenceNode (順序節點)：從左到右執行子節點。只要遇到【任何一個】子節點回傳 FAILURE，就會【立刻停止並回傳 FAILURE】。全部子節點成功才回傳 SUCCESS。
+[Behavior Tree Fundamentals]
+Strictly apply these rules during your deduction:
+1. SelectorNode: Executes children from left to right. Returns SUCCESS immediately if ANY child succeeds. Returns FAILURE only if ALL children fail.
+2. SequenceNode: Executes children from left to right. Returns FAILURE immediately if ANY child fails. Returns SUCCESS only if ALL children succeed.
 
-【CoT 深度思考指南】(必須在 <think> 中一步步推演)
-1. 意圖對齊：根據 Layer 1 的邏輯樹，在當前測資情境下，【期望】最終發生哪些具體動作？
-2. 軌跡追蹤：閱讀 Trace Log，沙盒中【實際】發生了什麼？在哪個節點發生了中斷或提早結束？
-3. 邏輯推演 (最關鍵)：結合【BT Fundamentals】，為什麼程式碼會這樣執行？是不是因為某個檢查條件回傳了 SUCCESS，導致父節點 (Selector) 認為任務完成而提前停止了？
-4. 結構重構：如果不希望它提早停止，或者希望它能走到後面的 Sequence 節點，目前的條件判斷 (例如：檢查是否有異常) 是不是放錯位置或邏輯顛倒了？應該如何重構條件節點的正反邏輯與排列順序，才能讓行為樹正確流轉？
-5. 結論歸屬：語法/API錯誤退回 L3；行為樹結構與條件邏輯錯誤退回 L2。若完全符合預期則 PASS。
+[Minimal Modification Principle (CRITICAL)]
+Your modification suggestions must be precise like a surgical strike. NEVER destroy, overwrite, or delete existing functional node logic to avoid catastrophic forgetting.
+Your `fixed_hint` must explicitly state:
+1. Insertion point: Before or after which existing node? Or wrapping which existing node in a new parent?
+2. Node type: Should the new logic be a ConditionNode, GuardedActionNode, or SelectorNode?
+3. Specific content: Keep original UI targets in Traditional Chinese (e.g., "確定", "未來之戰").
 
-【嚴格 JSON 輸出規範】
-請在 </think> 之後，只輸出以下格式的 JSON 字典：
+[CoT Deep Thinking Guide] (You MUST enclose your step-by-step reasoning inside <think> tags)
+1. Intent Alignment: What specific actions are EXPECTED based on the Layer 1 logic tree?
+2. Visual Check: What does the 'Visual Context' report about the current screen? Is the expected target even there?
+3. Trace Tracking: At which node did the execution stop or short-circuit in the Trace Log?
+4. Logic Deduction: WHY did the code fail? (e.g., Target missing on screen? BT structure didn't handle fallback?)
+5. Structural Refactoring: How should the tree be refactored following the Minimal Modification Principle?
+6. Conclusion: Assign to L3 if it's a Syntax/API error. Assign to L2 if it's a BT structure/condition logic error. Return PASS if perfect.
+
+[Strict JSON Output Format]
+After the </think> tag, output ONLY a JSON dictionary in this exact format:
 {
-  "status": "PASS" 或 "FAILED",
-  "target_layer": "L2" 或 "L3" 或 "NONE",
-  "diagnostic_message": "指出哪個節點引發了短路或錯誤",
-  "fixed_hint": "基於你的推演，給出具體的重構建議 (如何調整條件或順序)"
+  "status": "PASS" or "FAILED",
+  "target_layer": "L2" or "L3" or "NONE",
+  "diagnostic_message": "Explanation of the error, referencing BOTH the trace log and the visual context.",
+  "fixed_hint": "Specific refactoring instructions strictly following the minimal modification principle."
 }
 """
         
         user_prompt = f"""
-【Layer 1 原始邏輯樹 (Source of Truth)】
+[Layer 1 Original Logic Tree (Source of Truth)]
 {layer1_tree}
 
-【Layer 3 生成的 Python 程式碼】
+[Layer 3 Generated Python Code]
 {generated_code}
 
-【當前沙盒測資情境】
+[Current Sandbox Test Scenario]
 {test_scenario}
 
-【沙盒執行軌跡 (Trace Log)】
+[Sandbox Execution Trace Log]
 {raw_trace}
 
-請進行深度邏輯推演並回傳 JSON 診斷書。
+[Visual Context (What the VLM sees on the screen right now)]
+{vision_context}
+
+Please perform deep logical deduction and return the JSON diagnostic report.
 """
 
         try:
             response = ollama.chat(
-                model=self.model_name,
+                model=self.logic_model,
                 messages=[
                     {'role': 'system', 'content': system_prompt},
                     {'role': 'user', 'content': user_prompt}
@@ -150,7 +208,7 @@ class Layer4SandboxQA:
                 think_process = think_process.replace('<think>', '').strip()
                 json_part = json_part.strip()
             else:
-                think_process = "無思考過程"
+                think_process = "無思考過程 (Warning: Model bypassed CoT)"
                 json_part = raw_output.strip()
 
             json_match = re.search(r'```json\n(.*?)\n```', json_part, re.DOTALL)
@@ -167,12 +225,12 @@ class Layer4SandboxQA:
             return json.loads(final_json_str)
             
         except Exception as e:
-            print(f"\n[Layer 4] 診斷失敗: {e}")
-            return {"status": "FAILED", "target_layer": "L4", "diagnostic_message": "L4 本身解析錯誤", "fixed_hint": ""}
+            print(f"\n[Layer 4] 診斷失敗 (JSON 解析錯誤或呼叫失敗): {e}")
+            return {"status": "FAILED", "target_layer": "NONE", "diagnostic_message": "L4 本身解析錯誤", "fixed_hint": ""}
 
 
 # ==========================================
-# 模組 3：本地執行與模擬測試 (測試致命 Bug)
+# 模組 3：本地執行與模擬測試
 # ==========================================
 if __name__ == "__main__":
     
@@ -187,14 +245,10 @@ if __name__ == "__main__":
     bad_generated_code = """
 def build_startup_tree():
     step1 = GuardedActionNode(name="開啟未來之戰", target_desc="未來之戰")
-    
     check_ad = ConditionNode(name="檢查是否有廣告彈窗", check_prompt="ad popup")
-    
     close_ad = GuardedActionNode(name="關閉廣告", target_desc="close icon")
     dismiss_seq = SequenceNode(name="清理廣告", children=[close_ad])
-    
     selector = SelectorNode(name="處理廣告", children=[check_ad, dismiss_seq])
-    
     return SequenceNode(name="主流程", children=[step1, selector])
 """
 
@@ -220,14 +274,10 @@ def build_startup_tree():
         log_trace(f"執行階段崩潰: {e}")
 
     full_trace = "\n".join(trace_log)
-    print("\n" + "-"*40)
-    print("【沙盒原始軌跡 (Trace Log)】")
-    print(full_trace)
-    print("-"*40)
-
-    # 呼叫 L4 QA 進行推演 (使用 qwen3.5:9b)
-    qa = Layer4SandboxQA(model_name="qwen3.5:9b")
-    report = qa.evaluate(layer1_tree, bad_generated_code, test_scenario, full_trace)
+    
+    # 呼叫 L4 雙腦 QA (沒有實體圖片時，傳入 None 測試容錯)
+    qa = Layer4SandboxQA(vision_model="qwen3-vl:8b", logic_model="qwen2.5-coder:7b")
+    report = qa.evaluate(layer1_tree, bad_generated_code, test_scenario, full_trace, error_image_path=None)
     
     print("\n【Layer 4 產出的修復診斷書 (BugReport JSON)】")
     print(json.dumps(report, ensure_ascii=False, indent=2))

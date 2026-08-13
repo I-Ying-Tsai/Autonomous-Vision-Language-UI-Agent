@@ -5,3 +5,4 @@ platform-tools/
 *.png
 agent_memory.json
 qq.py
+tests/
