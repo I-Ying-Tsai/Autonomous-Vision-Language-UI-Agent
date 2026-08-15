@@ -32,7 +32,7 @@
  ┌────────────────────────────────────────────────────────┐
  │ 【Runtime 行為樹執行引擎】 (nodes.py + brain.py)        │
  │  • 節點架構: SequenceNode / SelectorNode / GuardedAction│
- │  • 視覺定位: SoM 候選標籤決策 / 同心圓二分搜逼近        │
+ │  • 視覺定位: SoM 候選標籤決策 / VLM 座標回歸        │
  │  • 記憶快取: 跨解析度正規化黃金座標快取                 │
  │  • 轉場驗證: 數學像素差值 ➔ VLM 雙圖語意比對           │
  └────────────────────────────────────────────────────────┘
@@ -104,13 +104,13 @@
 
 ### 3. 視覺感知與定位大腦 (`brain.py`)
 
-* **SoM (Set-of-Mark) 特化定位**：利用 OpenCV（邊緣檢測、形態學擴張、輪廓過濾）提取按鈕候選框並疊加編號標籤，由 VLM 進行多選一標籤決策，大幅降低小圖示連續座標回歸的誤差。
+* **SoM (Set-of-Mark) 特化定位**：利用 OpenCV（邊緣檢測、矩形形態學擴張、輪廓列表提取）動態抓取畫面中的 UI 候選框並疊加編號標籤，由 VLM 進行多選一標籤決策，實現高精度的離散定位。
 
 
-* **泛用同心圓二分搜尋**：從中心同心圓擴張鎖定存在區域，再以 1D 二元切分持續逼近精確像素座標。
+* **VLM 座標回歸**：當 SoM 未命中時，透過 0-1000 比例尺的 VLM 座標回歸直接預測目標中心點，達到 $O(1)$ 的定位。
 
 
-* **雙重轉場驗證**：先以 `ImageChops` 計算像素變化率（門檻值 12%），若未達標則調用 VLM 進行雙圖前後狀態語意比對。
+* **自適應轉場驗證**：結合極速的數學像素變異率分流（極低雜訊過濾與顯著全螢幕轉場直接通過），僅在灰色地帶啟動 VLM 語意審查，兼顧效能與抗動畫干擾能力。
 
 
 
@@ -123,6 +123,9 @@
 
 
 
+### 5. 背景異步串流與記憶體快取 ('environment.py')
+
+採用生產者-消費者執行緒模型，透過 adb exec-out 進行零磁碟 I/O 的背景畫面串流，並透過 Lazy Evaluation 支援 OpenCV 與 Base64 按需解碼，將取圖延遲從數百毫秒大幅降至 30ms 以內。
 ---
 
 ## 檔案結構 (Directory Structure)
@@ -130,15 +133,15 @@
 ```text
 .
 ├── config.py                 # ADB、裝置 ID、模型名稱與工作目錄配置
-├── environment.py            # ADB 底層封裝 (截圖、點擊、滑動、解析度獲取)
-├── brain.py                  # 視覺大腦 (SoM 標籤提取、二分搜定位、雙重轉場檢查)
+├── environment.py            # ADB 底層封裝
+├── brain.py                  # 視覺大腦
 ├── memory.py                 # 正規化座標快取與遊戲記憶管理
-├── nodes.py                  # 行為樹節點實作 (Sequence, Selector, GuardedAction, Condition)
-├── main.py                   # 系統進入點 (主迴圈、Tick 控制、演化與熱重載)
+├── nodes.py                  # 行為樹節點實作
+├── main.py                   # 系統進入點
 ├── requirements.txt          # Python 相依套件
 ├── compiler/
 │   ├── schemas.py            # Pydantic / Dataclass IR 資料結構與 BugReport 定義
-│   ├── layer1_intent.py      # L1 自然語言解析與目標分類 (Two-Pass)
+│   ├── layer1_intent.py      # L1 自然語言解析與目標分類
 │   ├── layer2_ir.py          # L2 IR 藍圖生成與外科手術式修補
 │   ├── layer3_codegen.py     # L3 Python 代碼生成器
 │   ├── layer4_sandbox.py     # L4 沙盒環境與雙腦 QA 診斷評估器
