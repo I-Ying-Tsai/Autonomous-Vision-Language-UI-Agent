@@ -10,40 +10,39 @@ from typing import Optional, List, Tuple, Dict
 from pydantic import BaseModel, Field
 from config import MODEL_NAME, WORKSPACE_DIR
 
-# ==========================================
-# [新增] Pydantic 結構化 Schema (強制 VLM 輸出格式)
-# ==========================================
 class XButtonDecision(BaseModel):
     target_label_id: int = Field(
-        description="The integer label ID (e.g. 2) that corresponds to the close 'X' button of the main dialog window. You MUST output a valid number from the image."
+        description="The integer label ID that corresponds to the close 'X' button of the main dialog window."
     )
     reasoning: str = Field(
+        default="",
         description="Brief explanation for why this label was chosen."
     )
-    confidence: float = Field(
-        default=0.0,
-        description="Confidence score between 0.0 and 1.0."
-    )
 
-# ==========================================
-# [新增] X Icon 專用特徵篩選器 (OpenCV)
-# ==========================================
-class XButtonSoMAnnotator:
-    def __init__(self, min_size: int = 25, max_size: int = 70):
-        self.min_size = min_size
-        self.max_size = max_size
+class GenericUISoMAnnotator:
+    """
+    泛用型 UI 標籤標註器 (改用 RETR_LIST 深入抓取彈窗內部所有按鈕)
+    """
+    def __init__(self, min_ratio: float = 0.012, max_ratio: float = 0.18):
+        self.min_ratio = min_ratio
+        self.max_ratio = max_ratio
 
-    def generate_x_candidates_som(self, image_path: str, output_path: str) -> Dict[int, Tuple[int, int]]:
+    def generate_candidates_som(self, image_path: str, output_path: str) -> Dict[int, Tuple[int, int]]:
         img = cv2.imread(image_path)
         if img is None:
             raise FileNotFoundError(f"無法載入圖片：{image_path}")
         
         orig_h, orig_w, _ = img.shape
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        min_dim = min(orig_h, orig_w)
+        
+        min_size = int(min_dim * self.min_ratio)
+        max_size = int(min_dim * self.max_ratio)
 
-        edged = cv2.Canny(gray, 40, 150)
-        cross_kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
-        dilated = cv2.dilate(edged, cross_kernel, iterations=1)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        edged = cv2.Canny(gray, 30, 120)
+        
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        dilated = cv2.dilate(edged, kernel, iterations=1)
 
         contours, _ = cv2.findContours(dilated, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
         
@@ -52,11 +51,16 @@ class XButtonSoMAnnotator:
             x, y, w, h = cv2.boundingRect(cnt)
             aspect_ratio = w / float(h)
 
-            if self.min_size <= w <= self.max_size and self.min_size <= h <= self.max_size:
-                if 0.70 <= aspect_ratio <= 1.40 and y < orig_h * 0.85:
+            if min_size <= w <= max_size and min_size <= h <= max_size:
+                if 0.3 <= aspect_ratio <= 3.0:
                     raw_candidates.append((x, y, w, h))
 
-        filtered_boxes = self._deduplicate_candidates(raw_candidates)
+        # 去重：以短邊的 2% 作為去重半徑
+        min_dist = int(min_dim * 0.02)
+        filtered_boxes = self._deduplicate_candidates(raw_candidates, min_dist=min_dist)
+
+        # 放寬最多候選數量至 45 個
+        filtered_boxes = filtered_boxes[:80]
 
         overlay = img.copy()
         labeled_img = img.copy()
@@ -67,20 +71,22 @@ class XButtonSoMAnnotator:
             center_y = y + h // 2
             label_map[idx] = (center_x, center_y)
 
-            label_x = max(5, x - 5)
-            label_y = max(20, y - 5)
             text = f"[{idx}]"
-            (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+            font_scale = max(0.4, min_dim / 1600.0)
+            (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 2)
 
-            cv2.rectangle(overlay, (label_x - 2, label_y - th - 2), (label_x + tw + 2, label_y + 2), (255, 0, 0), -1)
-            cv2.putText(labeled_img, text, (label_x, label_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+            label_x = max(5, x)
+            label_y = max(th + 5, y - 5)
 
-        cv2.addWeighted(overlay, 0.45, labeled_img, 0.55, 0, labeled_img)
+            cv2.rectangle(overlay, (label_x - 2, label_y - th - 2), (label_x + tw + 2, label_y + 2), (255, 50, 50), -1)
+            cv2.putText(labeled_img, text, (label_x, label_y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), 2, cv2.LINE_AA)
+
+        cv2.addWeighted(overlay, 0.4, labeled_img, 0.6, 0, labeled_img)
         cv2.imwrite(output_path, labeled_img)
         
         return label_map
 
-    def _deduplicate_candidates(self, boxes: List[Tuple[int, int, int, int]]) -> List[Tuple[int, int, int, int]]:
+    def _deduplicate_candidates(self, boxes: List[Tuple[int, int, int, int]], min_dist: int) -> List[Tuple[int, int, int, int]]:
         boxes = sorted(boxes, key=lambda b: b[2] * b[3], reverse=True)
         unique_boxes = []
         for b in boxes:
@@ -89,7 +95,7 @@ class XButtonSoMAnnotator:
             overlap = False
             for ux, uy, uw, uh in unique_boxes:
                 ucx, ucy = ux + uw // 2, uy + uh // 2
-                if abs(cx - ucx) < 25 and abs(cy - ucy) < 25:
+                if abs(cx - ucx) < min_dist and abs(cy - ucy) < min_dist:
                     overlap = True
                     break
             if not overlap:
@@ -99,17 +105,13 @@ class XButtonSoMAnnotator:
 
 class Brain:
     def __init__(self):
-        self.x_annotator = XButtonSoMAnnotator(min_size=15, max_size=70)
+        self.som_annotator = GenericUISoMAnnotator(min_ratio=0.012, max_ratio=0.18)
 
     def _get_b64(self, img_path):
         with open(img_path, "rb") as f:
             return base64.b64encode(f.read()).decode("utf-8")
 
-    # ==========================================
-    # [核心修改] 統一視覺定位入口 (Router)
-    # ==========================================
     def locate_target(self, img_path, target_desc) -> Optional[Tuple[int, int]]:
-        """智慧分流：依照目標描述決定要用哪種演算法定位"""
         is_close_btn = any(kw in target_desc.lower() for kw in ["x", "close", "關閉", "取消"])
         
         if is_close_btn:
@@ -122,13 +124,10 @@ class Brain:
         print(f"[Brain] 啟動【泛用二分搜/VLM預測模型】尋找: {target_desc}")
         return self.locate_target_binary_search(img_path, target_desc)
 
-    # ==========================================
-    # [新增] SoM 關閉按鈕特化定位
-    # ==========================================
     def _locate_x_button_som(self, img_path) -> Optional[Tuple[int, int]]:
         som_output_path = os.path.join(WORKSPACE_DIR, "temp_x_candidates_som.png")
         try:
-            label_map = self.x_annotator.generate_x_candidates_som(img_path, som_output_path)
+            label_map = self.som_annotator.generate_candidates_som(img_path, som_output_path)
             candidate_count = len(label_map)
             
             if candidate_count == 0:
@@ -136,32 +135,45 @@ class Brain:
                 return None
                 
             prompt = (
-                f"There are {candidate_count} candidate labels marked with [x] in the image.\n"
-                "Identify which label ID corresponds to the CLOSE ('X') button used to close the main central pop-up/dialog window.\n"
-                "Select the correct label ID from the candidates."
+                f"There are {candidate_count} numbered labels marked with [x] in the image.\n"
+                "Which label ID is the CLOSE ('X') button or DISMISS button for the modal popup / dialog window?\n"
+                "Return strictly JSON with the format: {\"target_label_id\": <number>, \"reasoning\": \"<explanation>\"}"
             )
             
             print(f"   [Brain] 成功篩選出 {candidate_count} 個候選點，發送給 VLM 進行決策...")
             res = ollama.chat(
                 model=MODEL_NAME, 
                 messages=[
-                    {'role': 'system', 'content': 'You are a precise GUI Automation Agent. Analyze the image labels and respond ONLY in JSON using the requested schema.'},
+                    {'role': 'system', 'content': 'You are a precise GUI Automation Agent. Output ONLY valid JSON matching the schema.'},
                     {'role': 'user', 'content': prompt, 'images': [self._get_b64(som_output_path)]}
                 ],
-                format=XButtonDecision.model_json_schema(),
                 options={'temperature': 0.1}
             )
             
-            decision = XButtonDecision.model_validate_json(res['message']['content'])
-            print(f"   [Brain] 模型決策結果: ID=[{decision.target_label_id}], 理由: {decision.reasoning}")
+            raw_content = res['message']['content']
             
-            target_id = decision.target_label_id
-            if target_id and target_id in label_map:
+            if '</think>' in raw_content:
+                raw_content = raw_content.split('</think>')[-1].strip()
+
+            json_match = re.search(r'\{.*?\}', raw_content, re.DOTALL)
+            if json_match:
+                data = json.loads(json_match.group(0))
+                target_id = int(data.get("target_label_id", 0))
+                reason = data.get("reasoning", "")
+            else:
+                # 暴力正則提取數字作為備援
+                num_match = re.search(r'target_label_id.*?(\d+)', raw_content)
+                target_id = int(num_match.group(1)) if num_match else 0
+                reason = "Regex Fallback Extraction"
+
+            print(f"   [Brain] 模型決策結果: ID=[{target_id}], 理由: {reason}")
+            
+            if target_id in label_map:
                 coord = label_map[target_id]
                 print(f"   精確點擊像素座標 : {coord}")
                 return coord
             else:
-                print(f"   [Brain] 模型選取的標籤編號 [{target_id}] 無效。")
+                print(f"   [Brain] 模型選取的標籤編號 [{target_id}] 無效或不在候選列表中。")
                 return None
                 
         except Exception as e:
@@ -171,9 +183,7 @@ class Brain:
             if os.path.exists(som_output_path):
                 os.remove(som_output_path)
 
-    # ==========================================
-    # [通用轉場驗證 1] 純數學像素比對
-    # ==========================================
+    # ---------------- 轉場與輔助比對 ----------------
     def is_screen_changed_math(self, img1, img2, threshold=12.0):
         try:
             if isinstance(img1, str): img1 = Image.open(img1).convert('RGB')
@@ -189,9 +199,6 @@ class Brain:
             print(f" ├─ [數學比對異常]: {e}")
             return False
 
-    # ==========================================
-    # [通用轉場驗證 2] VLM 通用雙圖對比
-    # ==========================================
     def check_screen_changed_vlm(self, img1_path, img2_path):
         prompt = "Compare Picture A (before action) and Picture B (after action). Has the user interface or screen navigated or transitioned significantly? Answer strictly YES or NO."
         res = ollama.chat(
@@ -201,9 +208,6 @@ class Brain:
         )
         return "YES" in res['message']['content'].upper()
 
-    # ==========================================
-    # [標準介面] 門禁與狀態檢查器
-    # ==========================================
     def check_presence(self, img_path, prompt_desc):
         prompt = f"Does the text, icon or state for 「{prompt_desc}」 appear clearly in this image? Answer strictly with YES or NO."
         res = ollama.chat(
@@ -213,24 +217,6 @@ class Brain:
         )
         return "YES" in res['message']['content'].upper()
 
-    def _get_center_point(self, img_path, element_desc, is_landscape=False):
-        prompt = f"Find the exact center point of the text or icon 「{element_desc}」. Output coordinates in the format: [y, x] using a 0-1000 scale."
-        res = ollama.chat(
-            model=MODEL_NAME, 
-            messages=[{'role': 'user', 'content': prompt, 'images': [self._get_b64(img_path)]}],
-            options={'temperature': 0.5, 'top_p': 0.9}
-        )
-        text = res['message']['content']
-        match = re.search(r'\[(\d+),\s*(\d+)\]', text)
-        if match:
-            v1, v2 = int(match.group(1)), int(match.group(2))
-            if is_landscape: return v1, v2
-            return v2, v1
-        return None, None
-
-    # ==========================================
-    # [標準介面] 精確定位器 (自動清理裁切碎片)
-    # ==========================================
     def locate_target_binary_search(self, img_path, target_desc):
         temp_crop_path = os.path.join(WORKSPACE_DIR, "temp_localization_crop.png")
         try:
