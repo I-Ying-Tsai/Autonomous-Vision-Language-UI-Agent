@@ -12,9 +12,9 @@ from pydantic import BaseModel, Field
 from config import MODEL_NAME, WORKSPACE_DIR
 from environment import ScreenFrame
 
-class XButtonDecision(BaseModel):
-    target_label_id: int = Field(description="The integer label ID that corresponds to the close 'X' button of the main dialog window.")
-    reasoning: str = Field(default="", description="Brief explanation for why this label was chosen.")
+class TargetDecision(BaseModel):
+    target_label_id: int = Field(description="The integer label ID that corresponds to the target element. Return 0 if none of the labels match the target.")
+    reasoning: str = Field(default="", description="Brief explanation for why this label was chosen or why none match.")
 
 class GenericUISoMAnnotator:
     def __init__(self, min_ratio: float = 0.012, max_ratio: float = 0.18):
@@ -97,38 +97,34 @@ class Brain:
         with open(img_path, "rb") as f:
             return base64.b64encode(f.read()).decode("utf-8")
 
-    def _pil_to_b64(self, pil_img: Image.Image) -> str:
-        """將裁切後的 PIL 圖片轉為 base64"""
-        buffered = io.BytesIO()
-        pil_img.save(buffered, format="PNG")
-        return base64.b64encode(buffered.getvalue()).decode("utf-8")
-
     def locate_target(self, frame: ScreenFrame, target_desc) -> Optional[Tuple[int, int]]:
-        is_close_btn = any(kw in target_desc.lower() for kw in ["x", "close", "關閉", "取消"])
-        if is_close_btn:
-            print(f"[Brain] 偵測到關閉按鈕意圖，啟動【SoM 特化視覺模型】尋找: {target_desc}")
-            coord = self._locate_x_button_som(frame)
-            if coord:
-                return coord
-            print("[Brain] SoM 特化定位失敗，退回泛用搜尋 (Fallback)...")
+        print(f"[Brain] 啟動【泛用 SoM 標籤模型】尋找: {target_desc}")
+        
+        # 第一道防線：SoM 離散預測
+        coord = self._locate_target_som(frame, target_desc)
+        if coord:
+            return coord
             
-        print(f"[Brain] 啟動【泛用二分搜/VLM預測模型】尋找: {target_desc}")
-        return self.locate_target_binary_search(frame, target_desc)
-
-    def _locate_x_button_som(self, frame: ScreenFrame) -> Optional[Tuple[int, int]]:
-        som_output_path = os.path.join(WORKSPACE_DIR, "temp_x_candidates_som.png")
+        # 第二道防線：直接坐標回歸
+        print(f"[Brain] SoM 標籤未命中，啟動【VLM 直接座標回歸 (0-1000)】尋找: {target_desc}")
+        return self._get_center_point(frame, target_desc)
+    
+    def _locate_target_som(self, frame: ScreenFrame, target_desc) -> Optional[Tuple[int, int]]:
+        som_output_path = os.path.join(WORKSPACE_DIR, "temp_candidates_som.png")
         try:
             label_map = self.som_annotator.generate_candidates_som(frame, som_output_path)
             candidate_count = len(label_map)
             
             if candidate_count == 0:
-                print("   [Brain] OpenCV 未搜尋到候選點。")
+                print("   [Brain] OpenCV 未搜尋到任何 UI 候選點。")
                 return None
                 
             prompt = (
-                f"There are {candidate_count} numbered labels marked with [x] in the image.\n"
-                "Which label ID is the CLOSE ('X') button or DISMISS button for the modal popup / dialog window?\n"
-                "Return strictly JSON with the format: {\"target_label_id\": <number>, \"reasoning\": \"<explanation>\"}"
+                f"There are {candidate_count} numbered labels in the image.\n"
+                f"Your target is: 「{target_desc}」.\n"
+                "Which label ID exactly points to this target?\n"
+                "Return strictly JSON with the format: {\"target_label_id\": <number>, \"reasoning\": \"<explanation>\"}\n"
+                "If none of the labels cover the target, return 0 for target_label_id."
             )
             
             res = ollama.chat(
@@ -154,8 +150,11 @@ class Brain:
                 target_id = int(num_match.group(1)) if num_match else 0
                 reason = "Regex Fallback Extraction"
             
-            if target_id in label_map:
+            print(f"   [Brain] 模型決策結果: ID=[{target_id}], 理由: {reason}")
+            
+            if target_id in label_map and target_id != 0:
                 coord = label_map[target_id]
+                print(f"   [Brain] SoM 定位成功！精確點擊像素座標 : {coord}")
                 return coord
             return None
         except Exception as e:
@@ -164,6 +163,40 @@ class Brain:
         finally:
             if os.path.exists(som_output_path):
                 os.remove(som_output_path)
+
+    def _get_center_point(self, frame: ScreenFrame, target_desc):
+        prompt = (
+            f"Find the exact center point of the UI element or text 「{target_desc}」 in the image. "
+            "Output the coordinates strictly in the format: [y, x] using a 0 to 1000 scale, where [0,0] is top-left and [1000,1000] is bottom-right."
+        )
+        try:
+            res = ollama.chat(
+                model=MODEL_NAME, 
+                messages=[{'role': 'user', 'content': prompt, 'images': [frame.as_base64]}],
+                options={'temperature': 0.1}
+            )
+            text = res['message']['content']
+            
+            # 使用正則提取 [y, x]
+            match = re.search(r'\[\s*(\d+)\s*,\s*(\d+)\s*\]', text)
+            if match:
+                norm_y, norm_x = int(match.group(1)), int(match.group(2))
+                
+                # 從 0-1000 比例尺映射回實際像素
+                img = frame.as_cv2
+                h, w, _ = img.shape
+                
+                pixel_x = int((norm_x / 1000.0) * w)
+                pixel_y = int((norm_y / 1000.0) * h)
+                
+                print(f"   [Brain] VLM 座標回歸成功！[比例尺: {norm_x}, {norm_y}] -> [實體像素: {pixel_x}, {pixel_y}]")
+                return pixel_x, pixel_y
+            else:
+                print(f"   [Brain] 無法從模型輸出解析座標: {text}")
+                return None
+        except Exception as e:
+            print(f"   [Brain] 座標回歸異常: {e}")
+            return None
 
     def verify_transition(self, frame1, frame2, lower_bound=3.0, upper_bound=40.0) -> bool:
         """
@@ -220,91 +253,3 @@ class Brain:
             options={'temperature': 0.1}
         )
         return "YES" in res['message']['content'].upper()
-
-    def locate_target_binary_search(self, frame: ScreenFrame, target_desc):
-        try:
-            img = frame.as_pil # [修改] 提取記憶體 PIL 物件
-            width, height = img.size
-            cx, cy = width // 2, height // 2
-            
-            box_size = 150   
-            expansion_step = 150
-            max_expansions = 12
-            
-            prev_left, prev_top, prev_right, prev_bottom = None, None, None, None
-            found_box = None
-            target_found = False
-
-            for attempt in range(max_expansions + 1):
-                left = max(0, cx - box_size // 2)
-                top = max(0, cy - box_size // 2)
-                right = min(width, cx + box_size // 2)
-                bottom = min(height, cy + box_size // 2)
-                
-                if right <= left: right = left + 1
-                if bottom <= top: bottom = top + 1
-                
-                # [修改] 全程在記憶體內做 Crop 並轉 base64，不寫入實體 temp_crop_path
-                crop_b64 = self._pil_to_b64(img.crop((left, top, right, bottom)))
-                    
-                if self._check_presence_b64(crop_b64, target_desc):
-                    print(f"   [Brain] 擴張第 {attempt} 次 ({right-left}x{bottom-top}): 成功捕獲目標！")
-                    target_found = True
-                    
-                    if attempt == 0:
-                        found_box = (left, top, right, bottom)
-                    else:
-                        strips = {
-                            "TOP": (left, top, right, prev_top),
-                            "BOTTOM": (left, prev_bottom, right, bottom),
-                            "LEFT": (left, prev_top, prev_left, prev_bottom),
-                            "RIGHT": (prev_right, prev_top, right, prev_bottom)
-                        }
-                        strip_matched = False
-                        for strip_name, coords in strips.items():
-                            sl, st, sr, sb = coords
-                            if sr <= sl or sb <= st: continue 
-                            
-                            strip_b64 = self._pil_to_b64(img.crop((sl, st, sr, sb)))
-                            if self._check_presence_b64(strip_b64, target_desc):
-                                found_box = (sl, st, sr, sb)
-                                strip_matched = True
-                                break
-                                
-                        if not strip_matched:
-                            found_box = (left, top, right, bottom)
-                    break
-                else:
-                    prev_left, prev_top, prev_right, prev_bottom = left, top, right, bottom
-                    box_size += expansion_step
-
-            if target_found and found_box:
-                cur_left, cur_top, cur_right, cur_bottom = found_box
-                print(f"   [Brain] 啟動 1D 二元切分逼近精確座標...")
-                
-                while (cur_right - cur_left) > 100 or (cur_bottom - cur_top) > 100:
-                    if (cur_right - cur_left) > (cur_bottom - cur_top):
-                        mid = (cur_left + cur_right) // 2
-                        test_box = (cur_left, cur_top, mid, cur_bottom)
-                        dir_name = "左半邊"
-                    else:
-                        mid = (cur_top + cur_bottom) // 2
-                        test_box = (cur_left, cur_top, cur_right, mid)
-                        dir_name = "上半邊"
-                        
-                    test_b64 = self._pil_to_b64(img.crop(test_box))
-                    if self._check_presence_b64(test_b64, target_desc):
-                        if dir_name == "左半邊": cur_right = mid
-                        else: cur_bottom = mid
-                    else:
-                        if dir_name == "左半邊": cur_left = mid
-                        else: cur_top = mid
-                        
-                global_x = (cur_left + cur_right) // 2
-                global_y = (cur_top + cur_bottom) // 2
-                return global_x, global_y
-
-            return None
-        except Exception as e:
-            print(f"[Brain] 二分搜發生異常: {e}")
-            return None
