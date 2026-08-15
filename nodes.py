@@ -121,10 +121,7 @@ class GuardedActionNode(Node):
         print(verify_msg); trace_log.append(verify_msg)
         
         # 進行記憶體轉場驗證
-        is_changed = brain.is_screen_changed_math(raw_screen, after_screen)
-        if not is_changed:
-            is_changed = brain.check_screen_changed_vlm(raw_screen, after_screen)
-
+        is_changed = brain.verify_transition(raw_screen, after_screen)
         if is_changed:
             success_msg = f" └─ [GuardedNode 成功] 轉場驗證通過，任務執行完畢並寫入快取。"
             print(success_msg); trace_log.append(success_msg)

@@ -165,19 +165,42 @@ class Brain:
             if os.path.exists(som_output_path):
                 os.remove(som_output_path)
 
-    def is_screen_changed_math(self, frame1: ScreenFrame, frame2: ScreenFrame, threshold=12.0):
+    def verify_transition(self, frame1, frame2, lower_bound=3.0, upper_bound=40.0) -> bool:
+        """
+        三段式自適應轉場驗證：結合數學極值過濾與 VLM 灰色地帶語意審查
+        """
         try:
-            diff = ImageChops.difference(frame1.as_pil, frame2.as_pil) # [修改] 直接比對記憶體物件
+            # 1. 數學像素計算
+            diff = ImageChops.difference(frame1.as_pil, frame2.as_pil)
             stat = ImageStat.Stat(diff)
             diff_ratio = (sum(stat.mean) / 3.0) / 255.0 * 100.0
-            print(f" ├─ [數學比對] 點擊前後畫面像素變更率: {diff_ratio:.2f}% (門檻: {threshold}%)")
-            return diff_ratio > threshold
+            
+            print(f" ├─ [轉場驗證] 點擊前後像素變更率: {diff_ratio:.2f}%")
+            
+            # 2. 自適應動態分流 (Adaptive Routing)
+            if diff_ratio < lower_bound:
+                print(f" ├─ [決策: 數學] 變更率低於 {lower_bound}%，判定為無效點擊。")
+                return False
+                
+            elif diff_ratio > upper_bound:
+                print(f" ├─ [決策: 數學] 變更率高於 {upper_bound}%，判定為顯著全螢幕轉場！")
+                return True
+                
+            else:
+                print(f" ├─ [決策: VLM] 變更率介於 ({lower_bound}% ~ {upper_bound}%)，AI 判斷中...")
+                return self.check_screen_changed_vlm(frame1, frame2)
+                
         except Exception as e:
-            print(f" ├─ [數學比對異常]: {e}")
-            return False
+            print(f" ├─ [轉場驗證異常]: {e}，退回保守 VLM 驗證...")
+            return self.check_screen_changed_vlm(frame1, frame2)
 
-    def check_screen_changed_vlm(self, frame1: ScreenFrame, frame2: ScreenFrame):
-        prompt = "Compare Picture A (before action) and Picture B (after action). Has the user interface or screen navigated or transitioned significantly? Answer strictly YES or NO."
+    def check_screen_changed_vlm(self, frame1, frame2):
+        prompt = (
+            "Compare Picture A (before action) and Picture B (after action). "
+            "Has the user interface transitioned successfully? "
+            "Opening a new app, showing a loading screen, a new large popup dialog, or moving to a different page all count as a successful transition (YES). "
+            "Only answer YES if there is a functional UI change. Answer strictly YES or NO."
+        )
         res = ollama.chat(
             model=MODEL_NAME, 
             messages=[{'role': 'user', 'content': prompt, 'images': [frame1.as_base64, frame2.as_base64]}],
