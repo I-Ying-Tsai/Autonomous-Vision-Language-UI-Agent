@@ -125,7 +125,7 @@
 
 ### 5. 背景異步串流與記憶體快取 ('environment.py')
 
-採用生產者-消費者執行緒模型，透過 adb exec-out 進行零磁碟 I/O 的背景畫面串流，並透過 Lazy Evaluation 支援 OpenCV 與 Base64 按需解碼，將取圖延遲從數百毫秒大幅降至 30ms 以內。
+* 採用生產者-消費者執行緒模型，透過 adb exec-out 進行零磁碟 I/O 的背景畫面串流，並透過 Lazy Evaluation 支援 OpenCV 與 Base64 按需解碼，將取圖延遲從數百毫秒大幅降至 30ms 以內。
 ---
 
 ## 檔案結構 (Directory Structure)
