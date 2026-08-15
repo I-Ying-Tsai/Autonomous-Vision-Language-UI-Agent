@@ -10,7 +10,6 @@ class NodeState:
 
 class Node:
     """行為樹基類"""
-    # [新增] 擴充 trace_log 陣列，用於記錄犯罪現場
     def tick(self, env, brain, memory, trace_log: list):
         raise NotImplementedError
 
@@ -70,7 +69,6 @@ class SelectorNode(Node):
         return NodeState.FAILURE
 
 class GuardedActionNode(Node):
-    # [保留修正] 強制要求傳入 game_name
     def __init__(self, name, target_desc, pre_check_prompt, game_name):
         self.name = name
         self.target_desc = target_desc
@@ -83,10 +81,8 @@ class GuardedActionNode(Node):
         
         screen_width, screen_height = env.get_screen_size()
         
+        # 取得 ScreenFrame 記憶體物件
         raw_screen = env.capture_screen()
-        from PIL import Image
-        with Image.open(raw_screen) as img:
-            before_img = img.copy().convert('RGB')
 
         if self.pre_check_prompt:
             check_msg = f" ├─ [Pre-Check] 門禁檢查: 「{self.pre_check_prompt}」"
@@ -108,7 +104,6 @@ class GuardedActionNode(Node):
             search_msg = f" ├─ [Grounding] 無快取，啟動視覺定位尋找目標..."
             print(search_msg); trace_log.append(search_msg)
             
-            # [核心修改] 呼叫大腦的新路由器 locate_target
             coord = brain.locate_target(raw_screen, self.target_desc)
             
             if not coord:
@@ -119,14 +114,14 @@ class GuardedActionNode(Node):
 
         env.tap(global_x, global_y, wait_time=5)
 
+        # 取得點擊後的 ScreenFrame 物件
         after_screen = env.capture_screen()
-        with Image.open(after_screen) as img:
-            after_img = img.copy().convert('RGB') 
 
         verify_msg = f" ├─ [Post-Check] 執行點擊後轉場驗證..."
         print(verify_msg); trace_log.append(verify_msg)
-        is_changed = brain.is_screen_changed_math(before_img, after_img)
         
+        # 進行記憶體轉場驗證
+        is_changed = brain.is_screen_changed_math(raw_screen, after_screen)
         if not is_changed:
             is_changed = brain.check_screen_changed_vlm(raw_screen, after_screen)
 
@@ -152,11 +147,11 @@ class ConditionNode(Node):
         self.retries = 0
 
     def tick(self, env, brain, memory, trace_log: list):
-        # 為了避免在 trace_log 塞滿 200 次的輪詢紀錄，我們只記錄關鍵的開始、成功與超時
         if self.retries == 0:
             msg = f"\n▶[Condition: {self.name}] 開始檢查並等待畫面出現: 「{self.check_prompt}」"
             print(msg); trace_log.append(msg)
             
+        # 取得 ScreenFrame 物件
         screen = env.capture_screen()
         
         if brain.check_presence(screen, self.check_prompt):

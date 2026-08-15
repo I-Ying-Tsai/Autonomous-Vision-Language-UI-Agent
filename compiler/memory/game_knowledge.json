@@ -1,32 +1,6 @@
 {
     "未來之戰": {
         "global_scene": {
-            "red X close button at top right corner": {
-                "norm_x": 0.8625,
-                "norm_y": 0.14,
-                "aliases": [
-                    "X",
-                    "關閉",
-                    "關閉按鈕",
-                    "右上角X",
-                    "紅色的X",
-                    "紅X"
-                ],
-                "pre_check_prompt": "popup window or X icon",
-                "fallback_strategy": "COLOR_RED_BOX_SCAN"
-            },
-            "未來之戰": {
-                "norm_x": 1.04,
-                "norm_y": 0.1638
-            },
-            "close icon": {
-                "norm_x": 1.5367,
-                "norm_y": 0.08
-            },
-            "確定": {
-                "norm_x": 1.1067,
-                "norm_y": 0.3981
-            }
         }
     }
 }

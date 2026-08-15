@@ -50,7 +50,7 @@ def initial_compilation(user_prompt: str):
 
 def main():
     print("==================================================")
-    print(" Autonomous Vision-Language UI Agent (雙腦演化版)")
+    print(" Autonomous Vision-Language UI Agent")
     print("==================================================")
     
     env = Environment()
@@ -94,7 +94,9 @@ def main():
                 print("\n[系統] 任務樹觸發熔斷！啟動黑盒子自我修復機制 (Layer 4)...")
                 
                 error_img_name = f"error_state_gen{generation}.png"
-                error_screen_path = env.capture_screen(error_img_name)
+                error_screen_path = os.path.join(WORKSPACE_DIR, error_img_name)
+                
+                env.capture_screen().save(error_screen_path)
                 
                 full_trace_str = "\n".join(trace_log)
                 
