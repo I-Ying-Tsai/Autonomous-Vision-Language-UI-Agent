@@ -1,6 +1,6 @@
 # Autonomous Vision-Language UI Agent
 
-An adaptive GUI automation framework for mobile applications and games. The system converts natural-language requirements into strongly typed Behavior Tree definitions and executes them through multimodal visual grounding, coordinate caching, and automated failure recovery.
+An adaptive GUI automation framework for mobile applications and games. The system converts natural-language requirements into strongly typed Behavior Tree definitions and executes them through multimodal visual grounding, UI target memory, and automated failure recovery.
 
 ## Overview
 
@@ -51,7 +51,7 @@ Natural Language Request
 | Runtime Execution Engine                    |
 | - 3 FPS background frame capture             |
 | - OCR / SoM / VLM grounding                  |
-| - Coordinate cache                           |
+| - UI Target Memory                         |
 | - Post-action verification                   |
 +----------------------------------------------+
           |
@@ -81,7 +81,7 @@ Natural Language Request
 | `environment.py` | Device I/O and streaming | Asynchronous ADB frame capture at 3 FPS. `ScreenFrame` provides lazy OpenCV, PIL, and Base64 representations.                  |
 | `brain.py`       | Multimodal perception    | Three-stage grounding pipeline: RapidOCR, Set-of-Mark detection, and VLM coordinate regression.                                |
 | `nodes.py`       | Behavior Tree execution  | Stateful `SequenceNode`, `SelectorNode`, `ConditionNode`, and `ActionNode` implementations.                                    |
-| `memory.py`      | Coordinate persistence   | Resolution-independent normalized coordinates with soft deletion after failed transitions.                                     |
+| `memory.py` | UI Target Memory | Stores resolution-independent normalized coordinates and target metadata, with soft deletion after failed transitions. |                        |
 | `compiler/`      | Compilation pipeline     | Intent classification, IR generation, structural patching, code generation, symbolic path expansion, and sandbox verification. |
 | `main.py`        | Runtime orchestration    | Execution lifecycle management, failure handling, generation tracking, and module hot reload.                                  |
 
@@ -89,9 +89,9 @@ Natural Language Request
 
 ### ActionNode
 
-1. Check `MemoryManager` for cached coordinates.
-2. Execute immediately when a valid cache entry exists.
-3. Run visual grounding when no valid cache entry is available.
+1. Check `MemoryManager` for a stored target coordinate.
+2. Execute immediately when a valid memory entry exists.
+3. Run visual grounding when no valid memory entry is available.
 4. Capture the post-action frame.
 5. Calculate the visual difference ratio `Delta`.
 
@@ -103,7 +103,7 @@ Delta < 3.0%        -> FAILURE
 3.0% <= Delta <= 12.0% -> VLM transition verification
 ```
 
-Successful actions update the coordinate cache. Failed transitions trigger soft deletion of the associated coordinate.
+Successful actions update the UI Target Memory. Failed transitions trigger soft deletion of the associated coordinate.
 
 ### ConditionNode
 
@@ -190,7 +190,7 @@ The project focuses on:
 * Deterministic task generation
 * Multimodal UI grounding
 * Resolution-independent coordinate persistence
-* Low-latency execution through caching
+* Low-latency execution through UI target memory
 * Closed-loop execution verification
 * Automated failure diagnosis and recovery
 * Minimal structural modification during self-healing
