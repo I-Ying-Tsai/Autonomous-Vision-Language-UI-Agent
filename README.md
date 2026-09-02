@@ -127,14 +127,11 @@ A terminal failure produces:
 
 ## Known Issues
 
-| ID       | Domain          | Severity | Description                                                                               | Status      |
-| -------- | --------------- | -------- | ----------------------------------------------------------------------------------------- | ----------- |
-| ISSUE-01 | Knowledge Base  | Critical | Invalid normalized coordinate exists for `未來之戰` (`norm_x: 1.0456`).                       | Pending     |
-| ISSUE-02 | IR Compiler     | Critical | Lobby loading and popup handling can block execution before the popup handler is reached. | In Progress |
-| ISSUE-03 | Code Generation | Major    | Startup timeout is insufficient for applications with long cold-start times.              | In Progress |
-| ISSUE-04 | Behavior Tree   | Major    | `ConditionNode.tick` uses blocking `time.sleep()`.                                        | Planned     |
-| ISSUE-05 | Device I/O      | Major    | ADB commands are not synchronized between background capture and execution threads.       | Planned     |
-| ISSUE-06 | Diagnostics     | Minor    | Layer 4 receives insufficient Layer 1 specification context.                              | Planned     |
+| ID       | Domain       | Severity | Description                                                                                                                                                               | Status      |
+| -------- | ------------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
+| ISSUE-01 | Device I/O   | Major    | ADB commands are not synchronized between background capture and execution threads, which may cause race conditions under high I/O load.                                  | Planned     |
+| ISSUE-02 | Self-Healing | Major    | The automated self-healing pipeline is not fully implemented. Failure diagnosis, structural patching, regeneration, and hot reload are currently incomplete.              | In Progress |
+| ISSUE-03 | Compiler     | Major    | Logical accuracy decreases when processing long or structurally complex natural-language instructions. The compiler may generate incomplete or incorrect task structures. | In Progress |
 
 ## Requirements
 
