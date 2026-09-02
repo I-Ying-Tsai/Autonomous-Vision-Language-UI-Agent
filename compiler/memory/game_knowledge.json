@@ -1,10 +1,7 @@
 {
     "未來之戰": {
         "global_scene": {
-            "未來之戰": {
-                "norm_x": 1.0456,
-                "norm_y": 0.1119
-            },
+            "未來之戰": {},
             "close icon": {
                 "norm_x": 1.5367,
                 "norm_y": 0.08
@@ -12,6 +9,104 @@
             "確定": {
                 "norm_x": 1.0289,
                 "norm_y": 0.4188
+            },
+            "confirm icon": {
+                "norm_x": 1.0533,
+                "norm_y": 0.4219
+            },
+            "關閉": {
+                "norm_x": 1.5367,
+                "norm_y": 0.08
+            },
+            "ad close button": {
+                "norm_x": 1.5367,
+                "norm_y": 0.08
+            },
+            "未來之戰 app icon": {
+                "norm_x": 1.02,
+                "norm_y": 0.1594
+            }
+        }
+    },
+    "FutureWar": {
+        "global_scene": {
+            "未來之戰": {
+                "norm_x": 0.5744,
+                "norm_y": 0.2822
+            },
+            "關閉": {
+                "norm_x": 0.8644,
+                "norm_y": 0.1411
+            },
+            "確定": {
+                "norm_x": 0.5794,
+                "norm_y": 0.7433
+            },
+            "戰鬥入場": {
+                "norm_x": 0.8806,
+                "norm_y": 0.92
+            },
+            "dimension mission": {
+                "norm_x": 0.3169,
+                "norm_y": 0.3
+            },
+            "次元任務": {
+                "norm_x": 0.3075,
+                "norm_y": 0.3
+            }
+        }
+    },
+    "BattleFlow": {
+        "global_scene": {
+            "戰鬥入場": {
+                "norm_x": 0.8806,
+                "norm_y": 0.92
+            },
+            "Dimensional Task": {
+                "norm_x": 0.3212,
+                "norm_y": 0.8156
+            },
+            "TEXT:戰鬥入場": {
+                "norm_x": 0.7475,
+                "norm_y": 0.9222
+            }
+        }
+    },
+    "战斗流程": {
+        "global_scene": {
+            "战鬥入場": {
+                "norm_x": 0.8812,
+                "norm_y": 0.9211
+            }
+        }
+    },
+    "Close Application": {
+        "global_scene": {
+            "CloseIcon": {}
+        }
+    },
+    "None": {
+        "global_scene": {
+            "MISSION": {}
+        }
+    },
+    "": {
+        "global_scene": {
+            "未來之戰": {
+                "norm_x": 0.5744,
+                "norm_y": 0.2822
+            },
+            "ICON:關閉": {
+                "norm_x": 0.8644,
+                "norm_y": 0.1422
+            },
+            "TEXT:確定": {
+                "norm_x": 0.5794,
+                "norm_y": 0.7444
+            },
+            "TEXT:戰鬥入場": {
+                "norm_x": 0.7475,
+                "norm_y": 0.9222
             }
         }
     }

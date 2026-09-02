@@ -44,76 +44,90 @@ class KnowledgeManager:
 
 
 class Layer1IntentParser:
-    """Layer 1: 先審核原始邏輯 ➔ 再進行 TEXT/ICON 分類與 KB 注入 (Two-Pass)"""
-    def __init__(self, model_name="qwen3.5:9b", db_path="compiler/memory/game_knowledge.json"):
+    """Layer 1: 原始邏輯梳理 ➔ 人工互動式勾選 TEXT/ICON ➔ 知識庫對齊"""
+    def __init__(self, model_name="qwen2.5-coder:7b", db_path="compiler/memory/game_knowledge.json"):
         self.model_name = model_name
         self.kb = KnowledgeManager(db_path=db_path)
 
     def _stage1_parse_structure(self, conversation_history: list) -> str:
-        """Pass 1：專注生成 ASCII 樹狀圖與完整捕捉所有目標 (含桌面 App)"""
+        """Pass 1：專注生成乾淨的邏輯樹狀圖 (純文字，嚴禁出現 TEXT/ICON 標籤)"""
         response = ollama.chat(
             model=self.model_name,
             messages=conversation_history,
-            options={'temperature': 0.2}
+            options={'temperature': 0.1}
         )
         return response['message']['content']
 
-    def _stage2_classify_targets(self, targets: list) -> dict:
-        """Pass 2：專注於判斷 TEXT/ICON 並翻譯英文，回傳強型別 JSON 字典"""
-        if not targets:
-            return {}
+    def _manual_classify_targets(self, targets: list, game_name: str) -> dict:
+        """[人工勾選取代 AI 推斷] 透過互動式 CLI 讓使用者指派屬性"""
+        classified_map = {}
+        print("\n" + "="*60)
+        print("【UI 目標屬性標註】請指定目標為文字 (TEXT) 或圖示 (ICON)：")
+        print("="*60)
 
-        system_prompt = """
-你是 UI 實體分類師。請分析輸入的按鈕/圖示名稱，判斷它是實體文字還是圖示，並回傳 JSON：
-- 若為畫面上的實體文字：type 填 "TEXT"，val 保持原文字內容。
-- 若為圖示/圖形/App Icon：type 填 "ICON"，val 翻譯為精確的英文描述。
+        for idx, target in enumerate(targets, 1):
+            # 先檢查知識庫是否已有紀錄
+            kb_hit = self.kb.lookup(game_name, target) if game_name else None
+            
+            print(f"\n目標 [{idx}/{len(targets)}]: 「{target}」")
+            if kb_hit:
+                print(f" ├─ [知識庫已有命中] 英文 Key: \"{kb_hit['eng_prompt']}\" (座標: {kb_hit['norm_x']}, {kb_hit['norm_y']})")
+                choice = input(" └─ 是否直接套用知識庫？ [Y/n] (預設 Y): ").strip().lower()
+                if choice in ["", "y"]:
+                    classified_map[target] = {
+                        "type": "ICON" if "icon" in kb_hit['eng_prompt'].lower() else "TEXT",
+                        "val": kb_hit['eng_prompt'],
+                        "from_kb": True,
+                        "kb_data": kb_hit
+                    }
+                    continue
 
-[回傳格式範例]
-{
-  "傳說風暴": {"type": "TEXT", "val": "傳說風暴"},
-  "Y": {"type": "ICON", "val": "green corret icon"},
-  "取消": {"type": "TEXT", "val": "取消"}
-}
-"""
-        user_prompt = f"請分類並處理以下 UI 目標列表：\n{json.dumps(targets, ensure_ascii=False)}"
+            # 人手動勾選
+            print(" ├─ [1] 實體文字 (TEXT) - 畫面可直接看見文字，給 OCR 辨識 (預設)")
+            print(" ├─ [2] 圖示/圖標 (ICON) - 無純文字之圖案/App 圖標，需英文視覺描述給 VLM")
+            t_choice = input(" └─ 請選擇類型 [1/2] (Enter 預設為 1): ").strip()
 
-        try:
-            response = ollama.chat(
-                model=self.model_name,
-                messages=[
-                    {'role': 'system', 'content': system_prompt},
-                    {'role': 'user', 'content': user_prompt}
-                ],
-                format='json',
-                options={'temperature': 0.0}
-            )
-            return json.loads(response['message']['content'])
-        except Exception as e:
-            print(f"[Layer 1 Pass 2] 警告：標籤分類失敗 ({e})，預設使用 TEXT 處理")
-            return {t: {"type": "TEXT", "val": t} for t in targets}
+            if t_choice == "2":
+                t_type = "ICON"
+                default_desc = f"{target} icon"
+                eng_desc = input(f"    └─ 請輸入該圖示的英文視覺特徵 (預設: \"{default_desc}\"): ").strip()
+                t_val = eng_desc if eng_desc else default_desc
+            else:
+                t_type = "TEXT"
+                t_val = target
+
+            classified_map[target] = {
+                "type": t_type,
+                "val": t_val,
+                "from_kb": False
+            }
+
+        return classified_map
 
     def parse_and_confirm(self, raw_input: str) -> str:
-        print(f"\n[Layer 1] 正在調用 {self.model_name} 執行 Pass 1 (邏輯樹狀梳理)...")
+        print(f"\n[Layer 1] 正在調用 {self.model_name} 執行邏輯樹狀梳理...")
         
-        # 提示詞關鍵更新：強調連開啟 App 本身也要用「」包裹！
+        # 修正後的提示詞：嚴格去除範例中的 TEXT:/ICON: 前綴，防止少樣本污染
         stage1_system_prompt = """
 你是自動化流程分析師，負責將使用者的需求拆解為具體步驟與邏輯分支。
 
 【嚴格規則】
-1. 第一行必須提取目標應用程式名稱，格式為：<GAME>遊戲名稱</GAME> (未提及則填 <GAME>None</GAME>)，若是需要點開應用程式，就將遊戲名稱用「」包裹。
-2. 所有需要點擊或辨識的目標，請一律用「」包裹名稱。
-3. 保持白話易懂，只輸出邏輯步驟與狀態判斷，不需要寫任何程式碼。
+1. 第一行必須提取目標應用程式名稱，格式為：<GAME>遊戲名稱</GAME> (未提及則填 <GAME>None</GAME>)。
+2. 【極度重要】只有真正需要「點擊 (Tap/Click)」的按鈕、圖標或 App 名稱，才可以使用「」包裹！
+3. 【嚴禁括號】任何「等待狀態」、「畫面名稱」、「條件描述」，一律保持白話純文字，絕對嚴禁加上「」括號！
+4. 不要產生重複步驟（例如不要同時寫進入 App 又寫點擊 App 圖示）。
+5. 嚴禁在「」內自行加入 TEXT: 或 ICON: 前綴！保持最純粹的按鈕名稱。
 
-【格式與邏輯參考範例 (請學習其結構與標籤使用方式)】
+【格式範例】
 <GAME>蝦皮購物</GAME>
-├─── [開始] 進入「蝦皮購物」應用程式
+├─── [開始] 點擊「蝦皮購物」應用程式
 │    ├─── 等待首頁載入完成
-│    └─── 判斷：購物車圖示上是否有紅點？
+│    └─── 判斷：是否出現紅包彈窗？
 │          ├─── [是]
-│          │    ├─── 點擊「ICON:shopping cart」
-│          │    └─── 點擊「TEXT:去買單」按鈕
+│          │    ├─── 點擊「關閉按鈕」
+│          │    └─── 點擊「確定」
 │          └─── [否]
-│               └─── 點擊「TEXT:每日特賣」區塊去逛逛
+│               └─── 點擊「每日特賣」
 """
         
         conversation_history = [
@@ -121,9 +135,7 @@ class Layer1IntentParser:
             {'role': 'user', 'content': f"請分析以下操作需求：\n{raw_input}"}
         ]
 
-        # -------------------------------------------------------------
-        # 階段一：人類審核 Pass 1 (確認步驟與「」標記是否齊全)
-        # -------------------------------------------------------------
+        # 階段一：結構審核
         while True:
             draft_text = self._stage1_parse_structure(conversation_history)
             conversation_history.append({'role': 'assistant', 'content': draft_text})
@@ -131,8 +143,13 @@ class Layer1IntentParser:
             game_match = re.search(r'<GAME>(.*?)</GAME>', draft_text, re.DOTALL | re.IGNORECASE)
             game_name = game_match.group(1).strip() if game_match else None
             
+            # 提取並過濾可能被 LLM 殘留污染的標籤
             raw_targets = re.findall(r'「(.*?)」', draft_text)
-            unique_targets = list(dict.fromkeys(raw_targets))
+            cleaned_targets = []
+            for t in raw_targets:
+                clean_t = re.sub(r'^(TEXT|ICON):', '', t).strip()
+                cleaned_targets.append(clean_t)
+            unique_targets = list(dict.fromkeys(cleaned_targets))
 
             print("\n" + "="*60)
             print("【Layer 1 草稿審核】請檢查邏輯與點擊目標是否完整：")
@@ -142,42 +159,36 @@ class Layer1IntentParser:
             print(f"抓取到的待分類目標列表: {unique_targets}")
             print("="*60)
 
-            confirm = input("\n請確認邏輯與標記目標是否完整？(輸入 'y' 進入屬性分類 / 或直接輸入修改意見): ").strip()
+            confirm = input("\n請確認邏輯是否正確？(輸入 'y' 進入手動屬性標記 / 或直接輸入修改意見): ").strip()
             
             if confirm.lower() == 'y':
-                print("\n[Layer 1] 人類審核通過！開始進行 Pass 2 屬性分類與知識庫對齊...")
                 break
             elif confirm:
                 print("\n正在根據您的建議重新調整邏輯樹...")
                 conversation_history.append({
                     'role': 'user', 
-                    'content': f"我有修改建議，請修正剛才的邏輯步驟與「」標記：\n{confirm}"
+                    'content': f"我有修改建議，請修正剛才的邏輯步驟：\n{confirm}"
                 })
 
-        # -------------------------------------------------------------
-        # 階段二：審核通過後，自動進行 TEXT/ICON 分類與 Knowledge Base 注入
-        # -------------------------------------------------------------
-        classified_map = {}
-        if unique_targets:
-            classified_map = self._stage2_classify_targets(unique_targets)
+        # 階段二：手動指定屬性
+        classified_map = self._manual_classify_targets(unique_targets, game_name)
 
         clean_text = draft_text
         hit_summary = []
 
-        for target in unique_targets:
-            info = classified_map.get(target, {"type": "TEXT", "val": target})
-            t_type = info.get("type", "TEXT")
-            t_val = info.get("val", target)
+        for target, info in classified_map.items():
+            t_type = info["type"]
+            t_val = info["val"]
+            
+            # 正則替換（容許原本文字裡可能有殘留的 TEXT:/ICON:）
+            pattern = rf'「(?:TEXT:|ICON:)?{re.escape(target)}」'
+            clean_text = re.sub(pattern, f"「{t_type}:{t_val}」", clean_text)
 
-            # 知識庫對齊 (若知識庫有命中，以知識庫為準)
-            kb_hit = self.kb.lookup(game_name, target) if game_name else None
-            if kb_hit:
-                eng_key = kb_hit['eng_prompt']
-                clean_text = clean_text.replace(f"「{target}」", f"「{t_type}:{eng_key}」")
-                hit_summary.append(f"  • 「{target}」 ➔ 知識庫命中 Key: \"{eng_key}\" (座標: {kb_hit['norm_x']}, {kb_hit['norm_y']})")
+            if info.get("from_kb"):
+                kb_hit = info["kb_data"]
+                hit_summary.append(f"  • 「{target}」 ➔ [知識庫直接套用] Key: \"{t_val}\" (座標: {kb_hit['norm_x']}, {kb_hit['norm_y']})")
             else:
-                clean_text = clean_text.replace(f"「{target}」", f"「{t_type}:{t_val}」")
-                hit_summary.append(f"  • 「{target}」 ➔ 自動推導屬性 {t_type}: \"{t_val}\"")
+                hit_summary.append(f"  • 「{target}」 ➔ [人工標記] {t_type}: \"{t_val}\"")
 
         print("\n" + "="*60)
         print("【Layer 1 最終完成之純淨標記文本】")
@@ -186,20 +197,9 @@ class Layer1IntentParser:
         
         if hit_summary:
             print("\n" + "-"*40)
-            print("[屬性分類與知識庫對齊紀錄]:")
+            print("[屬性對齊紀錄]:")
             for log in hit_summary:
                 print(log)
         print("="*60)
 
         return clean_text
-
-# ==========================================
-# 本地測試專區
-# ==========================================
-if __name__ == "__main__":
-    parser = Layer1IntentParser(model_name="qwen3.5:9b")
-    test_input = "進入未來之戰，然後等待載入畫面。如果跳出廣告彈窗，就點擊右上角的 X 關掉它，然後再點確定。如果沒彈窗就直接等大廳出現。"
-    
-    final_confirmed_text = parser.parse_and_confirm(test_input)
-    print("\n【交接給 Layer 2 的最終文本】:\n")
-    print(final_confirmed_text)

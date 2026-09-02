@@ -1,7 +1,8 @@
 from __future__ import annotations
+
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import List, Optional, Dict, Any, Union
+from typing import Any, Dict, List, Optional, Union
 
 
 class StepType(Enum):
@@ -17,10 +18,12 @@ class ErrorCategory(Enum):
     LOGICAL_DEADLOCK = "LOGICAL_DEADLOCK"
     UNHANDLED_STATE = "UNHANDLED_STATE"
 
+
 class TargetType(Enum):
     TEXT = "text"
     ICON = "icon"
     UNKNOWN = "unknown"
+
 
 @dataclass
 class IRStep:
@@ -38,26 +41,25 @@ class IRStep:
 
     @classmethod
     def from_dict(cls, data: dict) -> IRStep:
-        """將字典遞迴轉換為強型別 IRStep 物件（具備 LLM null 值容錯機制）"""
+        """Recursively converts dict into typed IRStep with null-safety."""
         if not isinstance(data, dict):
             return cls()
 
-        # 防呆：使用 `or []` 防範 LLM 輸出 "children": null
-        raw_children = data.get('children') or []
+        raw_children = data.get("children") or []
         children = [cls.from_dict(c) for c in raw_children if isinstance(c, dict)]
 
         return cls(
-            step_type=data.get('step_type') or StepType.SEQUENCE.value,
-            name=data.get('name') or "",
-            description=data.get('description') or "",
-            target=data.get('target'),
-            target_type=data.get('target_type') or TargetType.UNKNOWN.value,
-            context_desc=data.get('context_desc'),
-            pre_check_prompt=data.get('pre_check_prompt'),
-            check_prompt=data.get('check_prompt'),
-            normalized_coord=data.get('normalized_coord'),
-            fallback_strategy=data.get('fallback_strategy'),
-            children=children
+            step_type=data.get("step_type") or StepType.SEQUENCE.value,
+            name=data.get("name") or "",
+            description=data.get("description") or "",
+            target=data.get("target"),
+            target_type=data.get("target_type") or TargetType.UNKNOWN.value,
+            context_desc=data.get("context_desc"),
+            pre_check_prompt=data.get("pre_check_prompt"),
+            check_prompt=data.get("check_prompt"),
+            normalized_coord=data.get("normalized_coord"),
+            fallback_strategy=data.get("fallback_strategy"),
+            children=children,
         )
 
 
@@ -71,11 +73,11 @@ class IRBlueprint:
         if not isinstance(data, dict):
             return cls()
 
-        raw_steps = data.get('steps') or []
+        raw_steps = data.get("steps") or []
         steps = [IRStep.from_dict(s) for s in raw_steps if isinstance(s, dict)]
         return cls(
-            task_name=data.get('task_name') or "Untitled Task",
-            steps=steps
+            task_name=data.get("task_name") or "Untitled Task",
+            steps=steps,
         )
 
 
@@ -90,11 +92,12 @@ class BugReport:
     trace_log: str = ""
 
 
-def get_bug_report_attr(bug_report: Union[BugReport, dict, None], attr_name: str, default: str = "") -> str:
+def get_bug_report_attr(
+    bug_report: Union[BugReport, dict, None], attr_name: str, default: str = ""
+) -> str:
     if not bug_report:
         return default
 
-    # 提取原始值
     if isinstance(bug_report, dict):
         raw_val = bug_report.get(attr_name)
     else:

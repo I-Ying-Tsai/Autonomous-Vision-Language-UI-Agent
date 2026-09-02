@@ -3,6 +3,9 @@ import os
 DEVICE_ID = "127.0.0.1:16384"
 ADB_PATH = r".\platform-tools\adb"
 
+MODEL_GENERAL = "qwen3.5:9b"
+MODEL_CODER = "qwen2.5-coder:7b"
+MODEL_VISION = "qwen3-vl:8b"
 MODEL_NAME = "qwen3-vl:8b"
 
 WORKSPACE_DIR = "workspace"

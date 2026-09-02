@@ -1,69 +1,78 @@
 from nodes import SequenceNode, SelectorNode, GuardedActionNode, ConditionNode
 
 def build_startup_tree():
-    """任務樹：未來之戰_進入遊戲"""
+    """任務樹：未來之戰_遊戲流程"""
     
-    # 步驟 1：啟動 App
+    # 注意：target_desc 嚴格保持原始 target，不可追加 "app icon"
     step1_launch = GuardedActionNode(
-        name="進入未來之戰應用程式",
+        name="點擊未來之戰應用程式",
         target_desc="未來之戰",
-        pre_check_prompt="未來之戰 app icon on home screen",
+        pre_check_prompt="game icon on desktop",
         game_name="未來之戰"
     )
 
-    # 步驟 2：等待遊戲畫面載入完成
     step2_wait_loading = ConditionNode(
         name="等待遊戲畫面載入完成",
-        check_prompt="game UI with popup window, or clean game lobby",
-        max_retries=20,
-        interval=5
-    )
-
-    # 步驟 3：防禦性 Selector (狀態判定與清理)
-    
-    # 3-A: 檢查是否已經在遊戲大廳
-    check_game_lobby_clean = ConditionNode(
-        name="檢查遊戲大廳",
         check_prompt="game lobby without any popup windows",
-        max_retries=1,
-        interval=3
+        max_retries=10,
+        interval=2
     )
 
-    # 3-B: 清理廣告彈窗流程 (如果 3-A 失敗則執行)
-    click_close_ad = GuardedActionNode(
-        name="點擊關掉廣告彈窗",
-        target_desc="close icon",
-        pre_check_prompt="popup window or X icon",
-        game_name="未來之戰"
+    step3_ad_selector = SelectorNode(
+        name="判斷：是否出現廣告",
+        children=[
+            SequenceNode(
+                name="If 分支：有廣告",
+                children=[
+                    GuardedActionNode(
+                        name="點擊X",
+                        target_desc="X",
+                        pre_check_prompt="close icon (X)",
+                        game_name="未來之戰"
+                    ),
+                    GuardedActionNode(
+                        name="點擊確定",
+                        target_desc="確定",
+                        pre_check_prompt="confirm button",
+                        game_name="未來之戰"
+                    )
+                ]
+            ),
+            ConditionNode(
+                name="Else 分支：無廣告_繼續進行遊戲操作",
+                check_prompt="game lobby without any popup windows",
+                max_retries=10,
+                interval=2
+            )
+        ]
     )
 
-    click_confirm = GuardedActionNode(
-        name="點擊確定",
-        target_desc="確定",
-        pre_check_prompt="confirm button",
-        game_name="未來之戰"
+    step4_wait_modal = ConditionNode(
+        name="等待模態對話框出現",
+        check_prompt="popup window",
+        max_retries=10,
+        interval=2
     )
 
-    check_game_lobby_after_dismiss = ConditionNode(
-        name="確認成功進入遊戲大廳",
-        check_prompt="game lobby without any popup windows",
-        max_retries=5,
-        interval=3
+    step5_handle_modal = SequenceNode(
+        name="處理模態對話框",
+        children=[
+            GuardedActionNode(
+                name="點擊模態對話框的X",
+                target_desc="模態對話框的X",
+                pre_check_prompt="close icon (X)",
+                game_name="未來之戰"
+            ),
+            GuardedActionNode(
+                name="點擊模態對話框的確定",
+                target_desc="模態對話框的確定",
+                pre_check_prompt="confirm button",
+                game_name="未來之戰"
+            )
+        ]
     )
 
-    dismiss_ad_sequence = SequenceNode(
-        name="清理廣告彈窗流程",
-        children=[click_close_ad, click_confirm, check_game_lobby_after_dismiss]
-    )
-
-    # 組合 Selector
-    step3_handle_ads = SelectorNode(
-        name="判斷：是否有廣告彈窗 (容錯 Selector)",
-        children=[check_game_lobby_clean, dismiss_ad_sequence]
-    )
-
-    # 最終組合
     return SequenceNode(
         name="最終自動化流程",
-        children=[step1_launch, step2_wait_loading, step3_handle_ads]
+        children=[step1_launch, step2_wait_loading, step3_ad_selector, step4_wait_modal, step5_handle_modal]
     )

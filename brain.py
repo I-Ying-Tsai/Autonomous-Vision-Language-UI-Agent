@@ -11,18 +11,21 @@ from typing import Optional, List, Tuple, Dict
 from pydantic import BaseModel, Field
 from config import MODEL_NAME, WORKSPACE_DIR
 from environment import ScreenFrame
+from rapidocr_onnxruntime import RapidOCR
+import Levenshtein
 
 class TargetDecision(BaseModel):
     target_label_id: int = Field(description="The integer label ID that corresponds to the target element. Return 0 if none of the labels match the target.")
     reasoning: str = Field(default="", description="Brief explanation for why this label was chosen or why none match.")
 
 class GenericUISoMAnnotator:
-    def __init__(self, min_ratio: float = 0.012, max_ratio: float = 0.18):
+    def __init__(self, min_ratio: float = 0.008, max_ratio: float = 0.45):
+        # 微調 min_ratio 至 0.008，避免漏抓過小的關閉按鈕或圖示
         self.min_ratio = min_ratio
         self.max_ratio = max_ratio
 
     def generate_candidates_som(self, frame: ScreenFrame, output_path: str) -> Dict[int, Tuple[int, int]]:
-        img = frame.as_cv2.copy() # [修改] 直接從記憶體取 cv2 物件
+        img = frame.as_cv2.copy()
         
         orig_h, orig_w, _ = img.shape
         min_dim = min(orig_h, orig_w)
@@ -90,26 +93,89 @@ class GenericUISoMAnnotator:
 
 class Brain:
     def __init__(self):
-        self.som_annotator = GenericUISoMAnnotator(min_ratio=0.012, max_ratio=0.18)
+        self.som_annotator = GenericUISoMAnnotator(min_ratio=0.008, max_ratio=0.45)
+        # 初始化 RapidOCR ONNX 推論引擎
+        self.ocr = RapidOCR()
 
     def _get_b64_from_file(self, img_path):
-        """僅供讀取本機實體檔案 (如 SoM output) 使用"""
         with open(img_path, "rb") as f:
             return base64.b64encode(f.read()).decode("utf-8")
 
-    def locate_target(self, frame: ScreenFrame, target_desc) -> Optional[Tuple[int, int]]:
-        print(f"[Brain] 啟動【泛用 SoM 標籤模型】尋找: {target_desc}")
-        
-        # 第一道防線：SoM 離散預測
-        coord = self._locate_target_som(frame, target_desc)
+    def locate_target(self, frame: ScreenFrame, target_desc: str, target_type: str = "unknown", tier: int = 0) -> Optional[Tuple[int, int]]:
+        """
+        三階自適應視覺定位路由器 (Adaptive Multi-Tier Grounding)
+        - Tier 0: RapidOCR (最快、文字精準，非文字則秒速失敗)
+        - Tier 1: SoM 標籤模型 (OpenCV 邊緣標籤 + VLM 選號)
+        - Tier 2: VLM 座標回歸 (0-1000 比例尺中心點預測保底)
+        """
+        clean_desc = target_desc.replace("「", "").replace("」", "").strip()
+
+        pipeline = [
+            ("RapidOCR 引擎", lambda: self._locate_text_ocr(frame, clean_desc)),
+            ("SoM 標籤模型", lambda: self._locate_target_som(frame, clean_desc)),
+            ("VLM 座標回歸 (0-1000)", lambda: self._get_center_point(frame, clean_desc))
+        ]
+
+        selected_idx = tier % len(pipeline)
+        method_name, method_fn = pipeline[selected_idx]
+        print(f"[Brain] [策略輪替 Tier {selected_idx}] 啟動【{method_name}】尋找: {clean_desc}")
+
+        coord = method_fn()
         if coord:
             return coord
-            
-        # 第二道防線：直接坐標回歸
-        print(f"[Brain] SoM 標籤未命中，啟動【VLM 直接座標回歸 (0-1000)】尋找: {target_desc}")
-        return self._get_center_point(frame, target_desc)
+
+        # 若指定 Tier 未命中，自動順延執行管線中的其餘定位方式
+        for i in range(1, len(pipeline)):
+            next_idx = (selected_idx + i) % len(pipeline)
+            next_name, next_fn = pipeline[next_idx]
+            print(f"[Brain] 【{method_name}】無座標，自動順延至【{next_name}】...")
+            coord = next_fn()
+            if coord:
+                return coord
+
+        return None
+
+    def _locate_text_ocr(self, frame: ScreenFrame, target_desc: str) -> Optional[Tuple[int, int]]:
+        try:
+            result, _ = self.ocr(frame.as_cv2)
+            if not result:
+                return None
+
+            best_match = None
+            highest_ratio = 0.0
+
+            detected_summary = [line[1] for line in result]
+            print(f"   [RapidOCR 視線快照] 畫面上看到的文字: {detected_summary}")
+
+            target_clean = target_desc.strip().lower()
+            target_chars = set(target_clean)
+
+            for line in result:
+                box, detected_text, _ = line
+                det_clean = detected_text.strip().lower()
+
+                similarity = Levenshtein.ratio(target_clean, det_clean)
+                overlap_ratio = len(target_chars & set(det_clean)) / max(1, len(target_chars))
+
+                if target_clean in det_clean or det_clean in target_clean or similarity > 0.6 or overlap_ratio >= 0.5:
+                    combined_score = max(similarity, overlap_ratio)
+                    if combined_score > highest_ratio:
+                        highest_ratio = combined_score
+                        best_match = box
+
+            if best_match:
+                center_x = int(sum([p[0] for p in best_match]) / 4)
+                center_y = int(sum([p[1] for p in best_match]) / 4)
+                print(f"   [Brain] RapidOCR 定位成功！命中「{target_desc}」，實體座標: ({center_x}, {center_y})")
+                return center_x, center_y
+
+            print("   [Brain] RapidOCR 畫面未發現匹配字串。")
+            return None
+        except Exception as e:
+            print(f"   [Brain] RapidOCR 辨識異常: {e}")
+            return None
     
-    def _locate_target_som(self, frame: ScreenFrame, target_desc) -> Optional[Tuple[int, int]]:
+    def _locate_target_som(self, frame: ScreenFrame, target_desc: str) -> Optional[Tuple[int, int]]:
         som_output_path = os.path.join(WORKSPACE_DIR, "temp_candidates_som.png")
         try:
             label_map = self.som_annotator.generate_candidates_som(frame, som_output_path)
@@ -164,7 +230,7 @@ class Brain:
             if os.path.exists(som_output_path):
                 os.remove(som_output_path)
 
-    def _get_center_point(self, frame: ScreenFrame, target_desc):
+    def _get_center_point(self, frame: ScreenFrame, target_desc: str):
         prompt = (
             f"Find the exact center point of the UI element or text 「{target_desc}」 in the image. "
             "Output the coordinates strictly in the format: [y, x] using a 0 to 1000 scale, where [0,0] is top-left and [1000,1000] is bottom-right."
@@ -176,13 +242,13 @@ class Brain:
                 options={'temperature': 0.1}
             )
             text = res['message']['content']
+            if '</think>' in text:
+                text = text.split('</think>')[-1].strip()
             
-            # 使用正則提取 [y, x]
             match = re.search(r'\[\s*(\d+)\s*,\s*(\d+)\s*\]', text)
             if match:
                 norm_y, norm_x = int(match.group(1)), int(match.group(2))
                 
-                # 從 0-1000 比例尺映射回實際像素
                 img = frame.as_cv2
                 h, w, _ = img.shape
                 
@@ -198,31 +264,23 @@ class Brain:
             print(f"   [Brain] 座標回歸異常: {e}")
             return None
 
-    def verify_transition(self, frame1, frame2, lower_bound=3.0, upper_bound=40.0) -> bool:
-        """
-        三段式自適應轉場驗證：結合數學極值過濾與 VLM 灰色地帶語意審查
-        """
+    def verify_transition(self, frame1, frame2, lower_bound=3.0, upper_bound=12.0) -> bool:
         try:
-            # 1. 數學像素計算
             diff = ImageChops.difference(frame1.as_pil, frame2.as_pil)
             stat = ImageStat.Stat(diff)
             diff_ratio = (sum(stat.mean) / 3.0) / 255.0 * 100.0
             
             print(f" ├─ [轉場驗證] 點擊前後像素變更率: {diff_ratio:.2f}%")
             
-            # 2. 自適應動態分流 (Adaptive Routing)
             if diff_ratio < lower_bound:
                 print(f" ├─ [決策: 數學] 變更率低於 {lower_bound}%，判定為無效點擊。")
                 return False
-                
             elif diff_ratio > upper_bound:
                 print(f" ├─ [決策: 數學] 變更率高於 {upper_bound}%，判定為顯著全螢幕轉場！")
                 return True
-                
             else:
                 print(f" ├─ [決策: VLM] 變更率介於 ({lower_bound}% ~ {upper_bound}%)，AI 判斷中...")
                 return self.check_screen_changed_vlm(frame1, frame2)
-                
         except Exception as e:
             print(f" ├─ [轉場驗證異常]: {e}，退回保守 VLM 驗證...")
             return self.check_screen_changed_vlm(frame1, frame2)
@@ -239,17 +297,27 @@ class Brain:
             messages=[{'role': 'user', 'content': prompt, 'images': [frame1.as_base64, frame2.as_base64]}],
             options={'temperature': 0.1}
         )
-        return "YES" in res['message']['content'].upper()
+        content = res['message']['content']
+        if '</think>' in content:
+            content = content.split('</think>')[-1].strip()
+        return "YES" in content.upper()
 
     def check_presence(self, frame: ScreenFrame, prompt_desc):
         return self._check_presence_b64(frame.as_base64, prompt_desc)
 
     def _check_presence_b64(self, b64_img, prompt_desc):
-        """內部呼叫方法，支援傳入字串格式的 base64 (供二分搜裁切後使用)"""
-        prompt = f"Does the text, icon or state for 「{prompt_desc}」 appear clearly in this image? Answer strictly with YES or NO."
-        res = ollama.chat(
-            model=MODEL_NAME, 
-            messages=[{'role': 'user', 'content': prompt, 'images': [b64_img]}],
-            options={'temperature': 0.1}
-        )
-        return "YES" in res['message']['content'].upper()
+        clean_desc = prompt_desc.replace("「", "").replace("」", "").strip()
+        prompt = f"Does the text, icon or state for 「{clean_desc}」 appear clearly in this image? Answer strictly with YES or NO."
+        try:
+            res = ollama.chat(
+                model=MODEL_NAME, 
+                messages=[{'role': 'user', 'content': prompt, 'images': [b64_img]}],
+                options={'temperature': 0.1}
+            )
+            content = res['message']['content']
+            if '</think>' in content:
+                content = content.split('</think>')[-1].strip()
+            return "YES" in content.upper()
+        except Exception as e:
+            print(f"[Brain] check_presence 發生異常: {e}")
+            return False

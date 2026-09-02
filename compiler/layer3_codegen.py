@@ -3,16 +3,14 @@ import os
 import re
 import ollama
 import dataclasses
-from compiler.schemas import IRBlueprint
+from compiler.schemas import IRBlueprint, IRStep
 
 class Layer3CodeGenerator:
     def __init__(self, model_name="qwen2.5-coder:7b"):
         self.model_name = model_name
-        # 定義字典檔的路徑
         self.glossary_path = "workspace/glossary.json"
 
     def _load_glossary(self) -> str:
-        """動態讀取外部術語字典"""
         if os.path.exists(self.glossary_path):
             try:
                 with open(self.glossary_path, "r", encoding="utf-8") as f:
@@ -22,15 +20,56 @@ class Layer3CodeGenerator:
                 print(f"[Layer 3 警告] 無法讀取字典檔: {e}")
         return "{}"
 
+    def _collect_ir_targets(self, steps: list) -> list:
+        """遞迴收集 IR 藍圖中所有原始合法的 target 字串"""
+        targets = []
+        for step in steps:
+            if step.target:
+                targets.append(step.target.strip())
+            if step.children:
+                targets.extend(self._collect_ir_targets(step.children))
+        return list(dict.fromkeys(targets))
+
+    def _sanitize_code(self, generated_code: str, valid_targets: list) -> str:
+        """
+        [確定性後處理防禦]
+        若 LLM 自作聰明為 target_desc 加了 "app icon"、"按鈕" 等後綴，
+        自動將其還原為 IR 原始 target，確保 OCR 與快取 100% 命中。
+        """
+        sanitized_code = generated_code
+        for orig_target in valid_targets:
+            # 匹配 target_desc="<包含原始 target 且被多加後綴的字串>"
+            pattern = rf'target_desc\s*=\s*["\']({re.escape(orig_target)}[^\'"]*)["\']'
+            matches = re.findall(pattern, sanitized_code)
+            for full_match in matches:
+                if full_match != orig_target:
+                    print(f" [L3 後處理校正] 偵測到竄改！已將 '{full_match}' 還原為原始目標: '{orig_target}'")
+                    sanitized_code = re.sub(
+                        rf'target_desc\s*=\s*["\']{re.escape(full_match)}["\']',
+                        f'target_desc="{orig_target}"',
+                        sanitized_code
+                    )
+        return sanitized_code
+
     def generate_code(self, blueprint: IRBlueprint) -> str:
         print(f"\n[Layer 3] 正在調用 {self.model_name} 將 IR 藍圖編譯為 Python 原始碼...")
         
         dynamic_glossary = self._load_glossary()
-
         json_payload = json.dumps(dataclasses.asdict(blueprint), ensure_ascii=False, indent=2)
 
+        # -------------------------------------------------------------
+        # 1. 強化 Prompt：加入 STRICT IMMUTABILITY 與負面規則
+        # -------------------------------------------------------------
         system_prompt = f"""
 You are a Senior Core Python Engineer and Automation Testing Expert. Your task is to translate a Behavior Tree blueprint (IR JSON) into executable Python source code.
+
+[CRITICAL: STRICT IMMUTABILITY OF target_desc]
+1. `target_desc` MUST 100% EXACTLY MATCH the `target` string defined in the JSON step.
+2. NEVER append, modify, or translate `target_desc`! 
+   - Prohibited additions: "app icon", "button", "圖示", "按鈕", "圖標".
+   - Example Violation: JSON `"target": "未來之戰"` -> `target_desc="未來之戰 app icon"` (FORBIDDEN!)
+   - Correct Output: `target_desc="未來之戰"`
+3. Any alteration to `target_desc` corrupts the Memory Cache and breaks RapidOCR text matching!
 
 [VLM Prompt Generation Rules (Dynamic Glossary)]
 To ensure the Vision-Language Model (VLM) accurately recognizes the screen, strictly and preferentially refer to the English translations in the JSON dictionary below when deriving `check_prompt` and `pre_check_prompt`.
@@ -44,83 +83,36 @@ You MUST strictly implement and fill parameters for the following 4 node classes
 1. `SequenceNode(name: str, children: list)`: Linear execution.
 2. `SelectorNode(name: str, children: list)`: Conditional/Fallback branches.
 3. `ConditionNode(name: str, check_prompt: str, max_retries: int, interval: int)`: Used for waiting or status checking.
-   - [CRITICAL] Derive and generate a precise English VLM recognition prompt for `check_prompt` based on the JSON node's name and context.
-   - Default to max_retries=5, interval=3. If it's a time-consuming action like "waiting for loading", set max_retries=20, interval=5.
-4. `GuardedActionNode(name: str, target_desc: str, pre_check_prompt: str, game_name: str)`: Executes a click action.
-   - `target_desc` must be filled with the 'target' value from JSON (Keep original language, e.g., Traditional Chinese).
-   - `pre_check_prompt` must be an English description of the target for VLM pre-checking.
-   - [CRITICAL] `game_name` must be derived from the JSON blueprint or context (e.g., "未來之戰", "購物商城").
+   - [CRITICAL] `check_prompt` must describe the TARGET/RESULT state (e.g., "lobby screen", "home screen"), NOT transient states (do NOT use "loading" or "載入中").
+4. `GuardedActionNode(name: str, target_desc: str, game_name: str)`: Executes a click action.
+   - `target_desc`: Pure original target string from JSON. Do NOT append "app icon" or "button".
+   - `game_name`: Game or app context.
+   - DO NOT pass `pre_check_prompt`. All screen status verification MUST be done via `ConditionNode`.
 
 [Coding Style Requirements]
 1. The top of the file MUST include: `from nodes import SequenceNode, SelectorNode, GuardedActionNode, ConditionNode`
 2. The function name MUST be exactly: `def build_startup_tree():`
-3. You must write in the format of "defining node variables first -> assembling children later".
-4. When encountering If-Else popups or fallback logic (SelectorNode), design defensively: the first child of the Selector should usually be a ConditionNode (checking for a clean state), and the second child a SequenceNode (executing clear/fix actions).
+3. Define node variables first -> assemble children later.
 """
 
-        few_shot_user = "請根據『啟動購物商城並處理紅包彈窗』的 JSON 藍圖，產出高質量的行為樹腳本。"
+        few_shot_user = "請根據『啟動未來之戰』的 JSON 藍圖，產出高質量的行為樹腳本。"
         few_shot_assistant = '''```python
 from nodes import SequenceNode, SelectorNode, GuardedActionNode, ConditionNode
 
 def build_startup_tree():
-    """任務樹：啟動購物商城並處理促銷彈窗"""
+    """任務樹：啟動遊戲流程"""
     
-    # 步驟 1：啟動 App
+    # 注意：target_desc 嚴格保持原始 target，不可追加 "app icon"
     step1_launch = GuardedActionNode(
-        name="點擊桌面購物商城圖示",
-        target_desc="購物商城",
-        pre_check_prompt="shopping app icon on desktop",
-        game_name="購物商城"
+        name="進入未來之戰應用程式",
+        target_desc="未來之戰",
+        pre_check_prompt="game icon on desktop",
+        game_name="未來之戰"
     )
 
-    # 步驟 2：等待初始載入
-    step2_wait_loading = ConditionNode(
-        name="等待商城首頁載入",
-        check_prompt="promo popup, banner, or clean home screen",
-        max_retries=20,
-        interval=5
-    )
-
-    # 步驟 3：防禦性 Selector (狀態判定與清理)
-    
-    # 3-A: 檢查是否已經在乾淨首頁
-    check_home_clean = ConditionNode(
-        name="檢查商城首頁",
-        check_prompt="home screen without any promo popups",
-        max_retries=1,
-        interval=3
-    )
-
-    # 3-B: 清理紅包彈窗流程 (如果 3-A 失敗則執行)
-    click_close_promo = GuardedActionNode(
-        name="點擊紅包彈窗的關閉按鈕",
-        target_desc="close banner icon",
-        pre_check_prompt="promo popup or X icon",
-        game_name="購物商城"
-    )
-
-    check_home_after_dismiss = ConditionNode(
-        name="確認成功進入首頁",
-        check_prompt="home screen without any promo popups",
-        max_retries=5,
-        interval=3
-    )
-
-    dismiss_promo_sequence = SequenceNode(
-        name="清理促銷彈窗流程",
-        children=[click_close_promo, check_home_after_dismiss]
-    )
-
-    # 組合 Selector
-    step3_handle_popups = SelectorNode(
-        name="進入商城首頁 (容錯 Selector)",
-        children=[check_home_clean, dismiss_promo_sequence]
-    )
-
-    # 最終組合
     return SequenceNode(
         name="最終自動化流程",
-        children=[step1_launch, step2_wait_loading, step3_handle_popups]
+        children=[step1_launch]
     )
 ```'''
         
@@ -139,12 +131,9 @@ def build_startup_tree():
             )
             
             raw_output = response['message']['content']
-            
             if '</think>' in raw_output:
-                think_process, code_part = raw_output.split('</think>', 1)
-                think_process = think_process.replace('<think>', '').strip()
+                _, code_part = raw_output.split('</think>', 1)
             else:
-                think_process = "無思考過程"
                 code_part = raw_output
 
             code_match = re.search(r'```python\n(.*?)\n```', code_part, re.DOTALL)
@@ -153,39 +142,20 @@ def build_startup_tree():
                 
             final_code = code_match.group(1).strip() if code_match else code_part.strip()
             
+            # -------------------------------------------------------------
+            # 2. 確定性後處理：強制驗證並修正 target_desc
+            # -------------------------------------------------------------
+            valid_targets = self._collect_ir_targets(blueprint.steps)
+            sanitized_code = self._sanitize_code(final_code, valid_targets)
+            
             print("\n" + "="*60)
             print("【Layer 3 最終生成的 Python 程式碼 (task_definitions.py)】")
             print("="*60)
-            print(final_code)
+            print(sanitized_code)
             print("="*60)
             
-            return final_code
+            return sanitized_code
             
         except Exception as e:
             print(f"\n[Layer 3] 程式碼生成失敗: {e}")
             return ""
-
-# ==========================================
-# 本地串接測試 (整合 Layer 1 -> Layer 2 -> Layer 3)
-# ==========================================
-if __name__ == "__main__":
-    from layer1_intent import Layer1IntentParser
-    from layer2_ir import Layer2IRGenerator
-
-    test_input = "點擊未來之戰，然後等待載入畫面。如果跳出廣告彈窗，就點擊右上角的 X 關掉它，然後再點確定。如果沒彈窗就直接等大廳出現。"
-    
-    l1_parser = Layer1IntentParser(model_name="qwen3.5:9b")
-    confirmed_text = l1_parser.parse_and_confirm(test_input)
-
-    if confirmed_text:
-        l2_generator = Layer2IRGenerator(model_name="qwen2.5-coder:7b")
-        blueprint = l2_generator.generate_blueprint(confirmed_text)
-
-        if blueprint:
-            l3_generator = Layer3CodeGenerator(model_name="qwen2.5-coder:7b")
-            final_python_script = l3_generator.generate_code(blueprint)
-            
-            if final_python_script:
-                with open("task_definitions.py", "w", encoding="utf-8") as f:
-                    f.write(final_python_script)
-                print("\n已將生成的腳本儲存至 task_definitions.py！")
