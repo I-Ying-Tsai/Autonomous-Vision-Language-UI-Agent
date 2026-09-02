@@ -55,29 +55,16 @@ An adaptive GUI automation framework for mobile application and game interfaces,
 
 ---
 
-## Component Specifications
+### Component Specifications
 
 | Module | Scope | Architecture & Implementation |
-| --- | --- | --- |
-| `environment.py` | Device I/O & Streaming | Asynchronous daemon capturing frames at 3 FPS via ADB. `ScreenFrame` provides lazy evaluation for OpenCV (`as_cv2`), PIL (`as_pil`), and Base64 (`as_base64`) with PNG header sanitization.
-
- |
-| `brain.py` | Multimodal Perception | **Three-Tier Grounding Pipeline**: Tier 0 RapidOCR (Levenshtein matching) $\to$ Tier 1 Set-of-Mark (Canny/Contour tagging + VLM selection) $\to$ Tier 2 VLM $0\sim1000$ coordinate regression. Transition verification using structural pixel differencing with VLM arbitration fallback.
-
- |
-| `nodes.py` | Behavior Tree Execution | Stateful `SequenceNode`, short-circuit `SelectorNode`, polling `ConditionNode`, and side-effect-only `ActionNode` (cache-prioritized execution with post-action verification).
-
- |
-| `memory.py` | Coordinate Persistence | Stores resolution-invariant normalized coordinates ($0.0 \le \text{norm\_x}, \text{norm\_y} \le 1.0$). Implements soft-deletion on failed transitions to preserve target metadata while purging invalid coordinates.
-
- |
-| `compiler/` | Compilation Pipeline | **L1**: Human-in-the-loop (HITL) manual entity classification. **L2**: IR schema compilation and patching. **L3**: Defensive Python script generation with regex enforcement. **L4**: Symbolic path expansion, heuristic test pruning, and dual-model sandbox verification.
-
- |
-| `main.py` | Orchestration & Lifecycle | Generation supervisor managing execution states, fault capture, L4 escalation, and in-memory module hot-reloading via `importlib.reload` without process termination.
-
- |
-
+| :--- | :--- | :--- |
+| `environment.py` | Device I/O & Streaming | Asynchronous daemon capturing frames at 3 FPS via ADB. `ScreenFrame` provides lazy evaluation for OpenCV (`as_cv2`), PIL (`as_pil`), and Base64 (`as_base64`) with PNG header sanitization. |
+| `brain.py` | Multimodal Perception | **Three-Tier Grounding Pipeline**: Tier 0 RapidOCR (Levenshtein matching) -> Tier 1 Set-of-Mark (Canny/Contour tagging + VLM selection) -> Tier 2 VLM 0~1000 coordinate regression. Transition verification using structural pixel differencing with VLM arbitration fallback. |
+| `nodes.py` | Behavior Tree Execution | Stateful `SequenceNode`, short-circuit `SelectorNode`, polling `ConditionNode`, and side-effect-only `ActionNode` (cache-prioritized execution with post-action verification). |
+| `memory.py` | Coordinate Persistence | Stores resolution-invariant normalized coordinates (`0.0 <= norm_x, norm_y <= 1.0`). Implements soft-deletion on failed transitions to preserve target metadata while purging invalid coordinates. |
+| `compiler/` | Compilation Pipeline | **L1**: Human-in-the-loop (HITL) manual entity classification. **L2**: IR schema compilation and patching. **L3**: Defensive Python script generation with regex enforcement. **L4**: Symbolic path expansion, heuristic test pruning, and dual-model sandbox verification. |
+| `main.py` | Orchestration & Lifecycle | Generation supervisor managing execution states, fault capture, L4 escalation, and in-memory module hot-reloading via `importlib.reload` without process termination. |
 ---
 
 ## Runtime Execution Flow
