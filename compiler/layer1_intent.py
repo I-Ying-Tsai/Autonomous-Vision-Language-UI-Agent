@@ -1,7 +1,6 @@
 import json
 import os
 import re
-import ollama
 
 class KnowledgeManager:
     """知識庫管理員：負責載入並匹配遊戲專屬的固定座標與英文 Prompt"""
@@ -34,11 +33,21 @@ class KnowledgeManager:
             raw_aliases = info.get("aliases") or []
             aliases = [str(a).lower() for a in raw_aliases]
             
-            if target_lower in aliases or target_lower == eng_prompt.lower():
+            norm_x = info.get("norm_x")
+            norm_y = info.get("norm_y")
+            coord_is_valid = (
+                isinstance(norm_x, (int, float))
+                and isinstance(norm_y, (int, float))
+                and 0.0 <= norm_x <= 1.0
+                and 0.0 <= norm_y <= 1.0
+            )
+
+            # Empty or invalid historical entries are not useful knowledge hits.
+            if (target_lower in aliases or target_lower == eng_prompt.lower()) and (aliases or coord_is_valid):
                 return {
                     "eng_prompt": eng_prompt,
-                    "norm_x": info.get("norm_x"),
-                    "norm_y": info.get("norm_y")
+                    "norm_x": norm_x,
+                    "norm_y": norm_y
                 }
         return None
 
@@ -51,6 +60,8 @@ class Layer1IntentParser:
 
     def _stage1_parse_structure(self, conversation_history: list) -> str:
         """Pass 1：專注生成乾淨的邏輯樹狀圖 (純文字，嚴禁出現 TEXT/ICON 標籤)"""
+        import ollama
+
         response = ollama.chat(
             model=self.model_name,
             messages=conversation_history,
@@ -117,6 +128,7 @@ class Layer1IntentParser:
 3. 【嚴禁括號】任何「等待狀態」、「畫面名稱」、「條件描述」，一律保持白話純文字，絕對嚴禁加上「」括號！
 4. 不要產生重複步驟（例如不要同時寫進入 App 又寫點擊 App 圖示）。
 5. 嚴禁在「」內自行加入 TEXT: 或 ICON: 前綴！保持最純粹的按鈕名稱。
+6. 若某個 Else 分支沒有後續動作，請明確寫「無操作，任務完成」，不要自行發明「繼續進行操作」。
 
 【格式範例】
 <GAME>蝦皮購物</GAME>

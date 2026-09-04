@@ -1,196 +1,133 @@
 # Autonomous Vision-Language UI Agent
 
-An adaptive GUI automation framework for mobile applications and games. The system converts natural-language requirements into strongly typed Behavior Tree definitions and executes them through multimodal visual grounding, UI target memory, and automated failure recovery.
+An adaptive Android GUI automation framework that compiles natural-language requirements into a validated Behavior Tree intermediate representation (IR), then executes that IR through multimodal visual grounding, UI target memory, and bounded failure recovery.
 
-## Overview
+## Architecture
 
-The system is organized into four layers:
-
-1. **Intent Parsing**
-   Converts natural-language instructions into structured task descriptions with human-assisted entity classification.
-
-2. **IR Compilation**
-   Compiles structured task descriptions into a strongly typed intermediate representation (`IRBlueprint`) and applies structural patches when required.
-
-3. **Code Generation**
-   Generates deterministic Python task definitions with target validation and AST-level sanitization.
-
-4. **Runtime and Recovery**
-   Executes Behavior Trees using multimodal visual grounding and automatically diagnoses failed executions.
-
-## System Architecture
+1. **Intent Parsing** converts instructions into a reviewed task structure and lets a human classify click targets as text or icons.
+2. **IR Compilation** produces and validates an `IRBlueprint`.
+3. **IR Runtime** builds Behavior Tree nodes directly from the validated IR. Generated Python is an optional export format and is not automatically executed.
+4. **Runtime and Recovery** uses ADB, OCR, Set-of-Mark grounding, VLM fallback, postconditions, execution traces, and bounded IR patching.
 
 ```text
-Natural Language Request
-          |
-          v
-+----------------------------------------------+
-| Layer 1: Intent Parser                       |
-| - Logical structure extraction               |
-| - Entity classification                      |
-| - Coordinate knowledge alignment             |
-+----------------------------------------------+
-          |
-          v
-+----------------------------------------------+
-| Layer 2: IR Compiler                         |
-| - Strongly typed IR generation               |
-| - Structural patching                        |
-+----------------------------------------------+
-          |
-          v
-+----------------------------------------------+
-| Layer 3: Code Generator                     |
-| - Glossary injection                         |
-| - Target validation                          |
-| - Deterministic Python generation            |
-+----------------------------------------------+
-          |
-          v
-+----------------------------------------------+
-| Runtime Execution Engine                    |
-| - 3 FPS background frame capture             |
-| - OCR / SoM / VLM grounding                  |
-| - UI Target Memory                         |
-| - Post-action verification                   |
-+----------------------------------------------+
-          |
-          +----------------------+
-          |                      |
-       SUCCESS                 FAILURE
-          |                      |
-          v                      v
-     Task Complete       +---------------------+
-                         | Layer 4: QA         |
-                         | - State dump        |
-                         | - Visual analysis   |
-                         | - Root-cause analysis|
-                         +---------------------+
-                                  |
-                                  v
-                         Layer 2 Structural Patch
-                                  |
-                                  v
-                         Regeneration / Hot Reload
+Natural Language -> Reviewed Intent -> Validated IR -> IR Executor
+                                                       |
+                                +----------------------+
+                                | Runtime              |
+                                | - ADB frame stream   |
+                                | - OCR / SoM / VLM    |
+                                | - Target memory      |
+                                | - Postconditions     |
+                                +----------------------+
+                                      | failure
+                                      v
+                              Visual + trace diagnosis
+                                      |
+                                      v
+                              Validated IR patch
 ```
 
-## Component Specifications
+## Main Components
 
-| Module           | Scope                    | Implementation                                                                                                                 |
-| ---------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
-| `environment.py` | Device I/O and streaming | Asynchronous ADB frame capture at 3 FPS. `ScreenFrame` provides lazy OpenCV, PIL, and Base64 representations.                  |
-| `brain.py`       | Multimodal perception    | Three-stage grounding pipeline: RapidOCR, Set-of-Mark detection, and VLM coordinate regression.                                |
-| `nodes.py`       | Behavior Tree execution  | Stateful `SequenceNode`, `SelectorNode`, `ConditionNode`, and `ActionNode` implementations.                                    |
-| `memory.py` | UI Target Memory | Stores resolution-independent normalized coordinates and target metadata, with soft deletion after failed transitions. |                        |
-| `compiler/`      | Compilation pipeline     | Intent classification, IR generation, structural patching, code generation, symbolic path expansion, and sandbox verification. |
-| `main.py`        | Runtime orchestration    | Execution lifecycle management, failure handling, generation tracking, and module hot reload.                                  |
+| Module | Responsibility |
+| --- | --- |
+| `environment.py` | Synchronized ADB commands, bounded startup, fresh-frame barriers, and screenshot-based dimensions |
+| `brain.py` | Target-type-aware OCR / SoM / VLM grounding and transition verification |
+| `nodes.py` | Stateful Sequence, Selector, Condition, and Action Behavior Tree nodes |
+| `memory.py` | Bounds-checked normalized target coordinates with soft invalidation |
+| `compiler/schemas.py` | IR models and structural validation |
+| `compiler/ir_executor.py` | Direct conversion from validated IR to runtime nodes |
+| `compiler/layer1_intent.py` | Intent parsing and human-assisted target classification |
+| `compiler/layer2_ir.py` | Initial IR generation and structural patching |
+| `compiler/layer3_codegen.py` | Optional Python export |
+| `compiler/layer4_sandbox.py` | Screenshot and trace-assisted failure diagnosis |
+| `main.py` | Explicit CLI, task lifecycle, execution, and bounded repair generations |
 
-## Runtime Execution
+## Runtime Correctness
 
-### ActionNode
-
-1. Check `MemoryManager` for a stored target coordinate.
-2. Execute immediately when a valid memory entry exists.
-3. Run visual grounding when no valid memory entry is available.
-4. Capture the post-action frame.
-5. Calculate the visual difference ratio `Delta`.
-
-Transition rules:
-
-```text
-Delta > 12.0%       -> SUCCESS
-Delta < 3.0%        -> FAILURE
-3.0% <= Delta <= 12.0% -> VLM transition verification
-```
-
-Successful actions update the UI Target Memory. Failed transitions trigger soft deletion of the associated coordinate.
-
-### ConditionNode
-
-`ConditionNode` continuously evaluates the current screen state through `Brain.check_presence`.
-
-```text
-Target detected      -> SUCCESS
-Retry interval       -> RUNNING
-Maximum retries hit  -> FAILURE
-```
-
-### Self-Healing
-
-A terminal failure produces:
-
-* Current screen capture
-* Execution trace
-* Structured diagnostic input
-
-`Layer4SandboxQA` analyzes the execution state and produces a structured bug report. The compiler then applies a minimal structural patch, regenerates the task definition, increments the generation index, and reloads the generated module.
-
-## Known Issues
-
-| ID       | Domain       | Severity | Description                                                                                                                                                               | Status      |
-| -------- | ------------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
-| ISSUE-01 | Device I/O   | Major    | ADB commands are not synchronized between background capture and execution threads, which may cause race conditions under high I/O load.                                  | Planned     |
-| ISSUE-02 | Self-Healing | Major    | The automated self-healing pipeline is not fully implemented. Failure diagnosis, structural patching, regeneration, and hot reload are currently incomplete.              | In Progress |
-| ISSUE-03 | Compiler     | Major    | Logical accuracy decreases when processing long or structurally complex natural-language instructions. The compiler may generate incomplete or incorrect task structures. | In Progress |
+- Coordinates use the actual screenshot width and height, not `adb wm size`, so landscape and portrait coordinate systems remain aligned.
+- Cached normalized coordinates outside `[0, 1]` are ignored. Pixel coordinates are checked again before every tap or swipe.
+- ADB capture and input commands share a lock and have command timeouts.
+- Post-action verification waits for a frame captured after the input command.
+- Text targets start with OCR; icon targets skip OCR and start with Set-of-Mark grounding.
+- If an action defines `post_check_prompt`, that expected state is authoritative. Otherwise, the runtime measures the percentage of materially changed pixels and uses VLM verification for ambiguous transitions.
+- Selector and Sequence nodes preserve RUNNING state and reset child state when a branch completes.
 
 ## Requirements
 
-* Python 3.10+
-* Android Debug Bridge (ADB)
-* Ollama
-* `qwen2.5-coder:7b`
-* `qwen3-vl:8b`
+- Python 3.10+
+- Android Debug Bridge available as `adb`
+- Ollama
+- `qwen2.5-coder:7b`
+- `qwen3-vl:8b`
+
+Install Python dependencies and local models:
+
+```bash
+python -m pip install -r requirements.txt
+ollama pull qwen2.5-coder:7b
+ollama pull qwen3-vl:8b
+adb devices
+```
 
 ## Configuration
 
-The default ADB connection target is:
+Defaults can be overridden without editing source code:
 
-```text
-127.0.0.1:16384
-```
+| Environment variable | Default |
+| --- | --- |
+| `UI_AGENT_DEVICE_ID` | `127.0.0.1:16384` |
+| `UI_AGENT_ADB_PATH` | `adb` |
+| `UI_AGENT_MODEL_GENERAL` | `qwen3.5:9b` |
+| `UI_AGENT_MODEL_CODER` | `qwen2.5-coder:7b` |
+| `UI_AGENT_MODEL_VISION` | `qwen3-vl:8b` |
 
-The target can be modified in `config.py`.
+## Usage
 
-## Installation
-
-```bash
-# Verify ADB connectivity
-adb devices
-
-# Install Python dependencies
-pip install -r requirements.txt
-```
-
-## Execution
+Compile a task into validated IR:
 
 ```bash
-python main.py
+python main.py compile --task "Open the app and wait for its home screen"
 ```
 
-## Project Structure
+Run the current IR directly:
 
-```text
-.
-├── compiler/
-│   ├── ...
-├── environment.py
-├── brain.py
-├── nodes.py
-├── memory.py
-├── main.py
-├── config.py
-├── requirements.txt
-└── README.md
+```bash
+python main.py run
 ```
 
-## Design Goals
+Run without automatic IR patching:
 
-The project focuses on:
+```bash
+python main.py run --no-heal
+```
 
-* Deterministic task generation
-* Multimodal UI grounding
-* Resolution-independent coordinate persistence
-* Low-latency execution through UI target memory
-* Closed-loop execution verification
-* Automated failure diagnosis and recovery
-* Minimal structural modification during self-healing
+Use another blueprint or export Python for inspection:
+
+```bash
+python main.py compile --task "..." --output workspace/my_task.json
+python main.py run --blueprint workspace/my_task.json
+python main.py compile --task "..." --export-python workspace/exported_task.py
+```
+
+The tracked Python example is never selected implicitly:
+
+```bash
+python main.py run-example
+```
+
+## Tests
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+The unit suite covers Behavior Tree RUNNING semantics, target-type propagation, postconditions, IR validation, direct IR execution, and coordinate bounds.
+
+## Known Limitations
+
+- Complex natural-language branching can still be mistranslated by the local compiler model.
+- Layer 4 diagnosis and IR patching are model-driven and should not be trusted for high-impact UI actions without an approval layer.
+- UI target memory currently uses a global scene namespace; scene fingerprints and confidence decay remain future work.
+- The image-difference fallback can be affected by animated backgrounds. Prefer explicit `post_check_prompt` values in IR.
+- `layer4_red_team.py` remains experimental and is not part of the default runtime path.

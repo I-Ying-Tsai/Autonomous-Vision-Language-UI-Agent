@@ -2,17 +2,17 @@ import json
 import re
 import ollama
 from dataclasses import asdict
-from compiler.schemas import IRBlueprint
+from compiler.schemas import IRBlueprint, validate_blueprint
 
 class Layer2IRGenerator:
     """Layer 2: 狀態機與邏輯藍圖編譯層 (支援原始生成與熱增補 Patch 功能)"""
-    
+
     def __init__(self, model_name="qwen2.5-coder:7b"):
         self.model_name = model_name
 
     def generate_blueprint(self, layer1_text: str) -> IRBlueprint:
         print(f"\n[Layer 2] 正在調用 {self.model_name} 編譯初始行為樹藍圖 (IR JSON)...")
-        
+
         system_prompt = """
 你是資深的系統架構師與行為樹編譯器。請將 Layer 1 的樹狀邏輯文本，一字不漏（就事論事）地轉換為嚴格的 Behavior Tree JSON 藍圖。
 
@@ -22,23 +22,37 @@ class Layer2IRGenerator:
 - wait_condition: 等待某個畫面、載入或狀態完成。
 - guarded_action: 執行具體的點擊或互動動作。
 
+【空分支規則】
+- 若分支語意是「無操作」、「跳過」或「任務完成」，請輸出 step_type="sequence" 且 children=[]；空 Sequence 代表不執行動作並立即成功。
+- selector 不可輸出空的 children。
+
+【等待條件規則】
+- wait_condition 的 check_prompt 絕對不可為 null。
+- check_prompt 必須描述截圖中可辨識的「完成狀態」，不可照抄「等待...」操作指令。
+- 若後續步驟會處理遊戲內彈窗，則遊戲內介面上覆蓋彈窗也代表已進入遊戲；不可要求彈窗消失才算載入完成。
+
 【實體標記 (target & target_type) 提取規則】
 仔細觀察文本中被「」包裹的目標：
 - 若為「TEXT:內容」 ➔ target="內容", target_type="text"
 - 若為「ICON:內容」 ➔ target="內容", target_type="icon"
 注意：JSON 中的 target 欄位必須剝離 TEXT: 與 ICON: 前綴，也不要保留「」符號。
 注意: name 欄位是用來描述該步驟的易讀名稱，請將 name 欄位中的「TEXT:...」或「ICON:...」等原始標籤清除，保持文句通順。
+- context_desc 用來描述目標所在的頁面、彈窗或父分支情境。使用者只說 X、箭頭、頭像等通用圖示時，必須根據上下文自動補出 context_desc，不可要求使用者提供精確外觀。
 
 【JSON Schema 要求】
 必須回傳以下格式，直接輸出純 JSON 字串，不要包含 markdown 標籤：
 {
   "task_name": "任務名稱",
+  "app_name": "<GAME> 標籤中的應用程式名稱",
   "steps": [
     {
       "step_type": "sequence | selector | wait_condition | guarded_action",
       "name": "步驟描述",
       "target": null,
       "target_type": "text | icon | unknown",
+      "context_desc": "目標所在的畫面或父分支情境；無法推斷時為 null",
+      "check_prompt": "wait_condition 要辨識的完成狀態，其他節點為 null",
+      "post_check_prompt": "動作完成後的預期狀態；無法確定時為 null",
       "children": [ ...子節點... ]
     }
   ]
@@ -60,6 +74,7 @@ class Layer2IRGenerator:
 """
         few_shot_assistant = """{
   "task_name": "異界抽卡大師_登入流程",
+  "app_name": "異界抽卡大師",
   "steps": [
     {
       "step_type": "guarded_action",
@@ -73,6 +88,7 @@ class Layer2IRGenerator:
       "name": "等待登入載入完成",
       "target": null,
       "target_type": "unknown",
+      "check_prompt": "異界抽卡大師的遊戲內介面或遊戲內彈窗已顯示，且不是裝置桌面、啟動畫面或載入畫面",
       "children": []
     },
     {
@@ -92,6 +108,7 @@ class Layer2IRGenerator:
               "name": "點擊禮盒圖示",
               "target": "gift box icon",
               "target_type": "icon",
+              "context_desc": "每日簽到彈窗內的禮盒圖示",
               "children": []
             },
             {
@@ -108,6 +125,7 @@ class Layer2IRGenerator:
           "name": "Else 分支：無彈窗_等待主城頁面",
           "target": null,
           "target_type": "unknown",
+          "check_prompt": "異界抽卡大師的主城頁面已清楚顯示",
           "children": []
         }
       ]
@@ -129,16 +147,20 @@ class Layer2IRGenerator:
                 format='json',
                 options={'temperature': 0.0}
             )
-            
+
             raw_output = response['message']['content']
             json_str = re.sub(r'```json\n|\n```', '', raw_output).strip()
-            
+
             blueprint_dict = json.loads(json_str)
-            blueprint = IRBlueprint.from_dict(blueprint_dict)
-            
-            print("\n[Layer 2] IR JSON 藍圖編譯成功！強型別斷言通過。")
+            warnings = []
+            blueprint = IRBlueprint.from_dict(blueprint_dict, warnings=warnings)
+            validate_blueprint(blueprint, warnings=warnings)
+
+            print("\n[Layer 2] IR JSON 藍圖編譯成功，安全驗證通過。")
+            for warning in warnings:
+                print(f" [IR 正規化警告] {warning}")
             return blueprint
-            
+
         except Exception as e:
             print(f"\n[Layer 2] JSON 解析失敗: {e}")
             return None
@@ -149,10 +171,10 @@ class Layer2IRGenerator:
         在嚴格保留原有正確邏輯的前提下，更新產出新一代 IRBlueprint。
         """
         print(f"\n[Layer 2 Patch] 正在調用 {self.model_name} 對舊藍圖進行外科手術局部增補...")
-        
+
         old_blueprint_dict = asdict(old_blueprint) if hasattr(old_blueprint, "__dataclass_fields__") else old_blueprint
         old_json_str = json.dumps(old_blueprint_dict, ensure_ascii=False, indent=2)
-        
+
         diagnostic_message = bug_report.get("diagnostic_message", "無詳細診斷")
         fixed_hint = bug_report.get("fixed_hint", "無具體修復建議")
 
@@ -169,6 +191,7 @@ class Layer2IRGenerator:
 必須回傳以下格式，直接輸出純 JSON 字串，不要包含 markdown 標籤：
 {
   "task_name": "任務名稱",
+  "app_name": "應用程式名稱",
   "steps": [ ... 包含修補後的全新步驟陣列 ... ]
 }
 """
@@ -196,19 +219,23 @@ class Layer2IRGenerator:
                 format='json',
                 options={'temperature': 0.1}
             )
-            
+
             raw_output = response['message']['content']
             json_str = re.sub(r'```json\n|\n```', '', raw_output).strip()
-            
+
             if '</think>' in json_str:
                 json_str = json_str.split('</think>')[-1].strip()
-                
+
             blueprint_dict = json.loads(json_str)
-            new_blueprint = IRBlueprint.from_dict(blueprint_dict)
-            
-            print("\n[Layer 2 Patch] 外科手術增補完成！新一代 IR Blueprint 強型別轉換成功。")
+            warnings = []
+            new_blueprint = IRBlueprint.from_dict(blueprint_dict, warnings=warnings)
+            validate_blueprint(new_blueprint, warnings=warnings)
+
+            print("\n[Layer 2 Patch] 外科手術增補完成，安全驗證通過。")
+            for warning in warnings:
+                print(f" [IR 正規化警告] {warning}")
             return new_blueprint
-            
+
         except Exception as e:
             print(f"\n[Layer 2 Patch] 藍圖增補修復失敗: {e}")
             return None

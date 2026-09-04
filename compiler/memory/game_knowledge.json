@@ -1,30 +1,27 @@
 {
     "未來之戰": {
         "global_scene": {
-            "未來之戰": {},
-            "close icon": {
-                "norm_x": 1.5367,
-                "norm_y": 0.08
+            "未來之戰": {
+                "norm_x": 0.5744,
+                "norm_y": 0.2811
             },
+            "close icon": {},
+            "確定": {},
+            "confirm icon": {},
+            "關閉": {},
+            "ad close button": {},
+            "未來之戰 app icon": {}
+        },
+        "彈窗廣告內的關閉按鈕": {
+            "X": {
+                "norm_x": 0.8644,
+                "norm_y": 0.1422
+            }
+        },
+        "判斷：是否出現彈窗廣告 > If 分支：有彈窗廣告": {
             "確定": {
-                "norm_x": 1.0289,
-                "norm_y": 0.4188
-            },
-            "confirm icon": {
-                "norm_x": 1.0533,
-                "norm_y": 0.4219
-            },
-            "關閉": {
-                "norm_x": 1.5367,
-                "norm_y": 0.08
-            },
-            "ad close button": {
-                "norm_x": 1.5367,
-                "norm_y": 0.08
-            },
-            "未來之戰 app icon": {
-                "norm_x": 1.02,
-                "norm_y": 0.1594
+                "norm_x": 0.5794,
+                "norm_y": 0.7444
             }
         }
     },
